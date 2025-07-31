@@ -3,6 +3,11 @@
  *  Important #ifndef the display you want to use other displays must be all ifndef
  */
 
+/**
+************Currently set to EPD7IN5_V2_C********************
+*/
+
+
 
 // Type definitions
 #define UBYTE unsigned char
@@ -17,6 +22,7 @@
 #include <HTTPClient.h>
 #include <WebServer.h>
 #include <EEPROM.h>
+
 
 
 #include <WiFiClientSecure.h>
