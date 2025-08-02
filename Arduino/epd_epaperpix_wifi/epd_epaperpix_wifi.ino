@@ -343,7 +343,7 @@ SlideShowStatus GetFile()
       USE_SERIAL.print("[HTTPS] begin...\n");
       String url =String(API_BASE_URL) + String(API_FILE_ENDPOINT) + String(storedUserId)+String("/") +String(storedScreenName)+String("/")+String("?subscription-key=")+String(storedSubId) ;
       USE_SERIAL.println(url);
-      if (  https.begin(url) ) {  // HTTPS  https://epaper2.azurewebsites.net/api/DSync?code=KVkxT7cdOSTEe-SJ6GDuXmwNkIJvBO9ZKajMgnAm4qyfAzFuutuBWQ==
+      if (  https.begin(url) ) {  
         USE_SERIAL.print("[HTTPS] POST...\n");
         // start connection and send HTTP header
          https.addHeader("Content-Type", "application/json");
