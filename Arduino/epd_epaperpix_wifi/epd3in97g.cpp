@@ -41,6 +41,9 @@
 
 #define EPD_STEPS       1
 #define EPD_BLOCK_SIZE  96000
+// Pixel format for this display
+#define EPD_BITS_PER_PIXEL 2    // Color: 4 bits per pixel
+#define EPD_PIXELS_PER_BYTE 4   // Each byte contains 4 pixels
 
 
 Epd::~Epd() {
@@ -53,6 +56,8 @@ Epd::Epd() {
     busy_pin = BUSY_PIN;
     width = EPD_WIDTH;
     height = EPD_HEIGHT;
+    bits_per_pixel = EPD_BITS_PER_PIXEL;
+    pixels_per_byte = EPD_PIXELS_PER_BYTE;
     steps = EPD_STEPS;
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0] = 0x10;

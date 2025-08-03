@@ -181,6 +181,8 @@ void setup() {
  
 
    USE_SERIAL.begin(115200);
+
+   // Do this to clear eeprom 
   //  clearEEPROM();
   //   for(;;)
   //   {

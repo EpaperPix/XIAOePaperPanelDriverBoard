@@ -49,6 +49,9 @@ void Epd::QRset( int scale) {
         Serial.print(" bits per pixel, ");
         Serial.print(pixels_per_byte);
         Serial.println(" pixels per byte");
+        if(bits_per_pixel == 2) {
+            Serial.println("QRset: Using 2-bit color mode (4 colors)");
+        }
         Serial.print("Steps: ");
         Serial.println(steps);
     }
@@ -124,6 +127,50 @@ void Epd::QRset( int scale) {
                     }
                     
                     SendData(pixel_pair);
+                }
+            }
+            
+        } else if(bits_per_pixel == 2) {
+            // 2-bit color (4 pixels per byte)
+            for(int display_row = 0; display_row < height; display_row++) {
+                int qr_row = display_row / scale;
+                int qr_col = 0;
+                int x_scale_counter = 0;
+                
+                for(int byte_col = 0; byte_col < width/pixels_per_byte; byte_col++) {
+                    UBYTE packed_byte = 0;
+                    
+                    // Process 4 pixels for this byte
+                    for(int pixel = 0; pixel < pixels_per_byte; pixel++) {
+                        UBYTE pixel_color;
+                        
+                        // Check if we're outside the QR code area
+                        if(qr_row >= QRDIM || qr_col >= QRDIM) {
+                            pixel_color = 0x1;  // White background
+                        } else {
+                            // Get bit from QR code data
+                            int bit_position = qr_row * QRDIM + qr_col;
+                            if(bit_position >= QRDIM * QRDIM) {
+                                pixel_color = 0x1;  // White if out of bounds
+                            } else {
+                                uint8_t bit_value = get_bit(wifi_qrcode_32x32_data, bit_position);
+                                pixel_color = bit_value? (qr_color & 0x3) : 0x1;  // QR color (masked to 2 bits) or white
+                            }
+                        }
+                        
+                        // Pack pixel into byte (first pixel in bits 7-6, second in 5-4, third in 3-2, fourth in 1-0)
+                        int shift = (3 - pixel) * 2;
+                        packed_byte |= (pixel_color << shift);
+                        
+                        // Advance to next QR column when we've processed enough pixels
+                        x_scale_counter++;
+                        if(x_scale_counter >= scale) {
+                            x_scale_counter = 0;
+                            qr_col++;
+                        }
+                    }
+                    
+                    SendData(packed_byte);
                 }
             }
             
