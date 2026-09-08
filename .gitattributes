@@ -1,0 +1,22 @@
+# Normalize line endings: store LF in the repo, let git handle checkout per platform
+* text=auto
+
+# Binary files - never touch line endings
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.bmp binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.bin binary
+*.dll binary
+*.exe binary
+*.pfx binary
+*.snk binary
