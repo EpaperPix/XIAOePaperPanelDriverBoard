@@ -22,6 +22,11 @@
 #include <HTTPClient.h>
 #include <WebServer.h>
 #include <EEPROM.h>
+#include "FrameTransfer.h"
+#include <WiFiClientSecure.h>
+#include "TrustedRoots.h"
+void GoToSleep(long seconds);
+bool validDeviceId(const String& value);
 
 
 
@@ -34,13 +39,13 @@
 // EEPROM size and addresses
 #define EEPROM_SIZE 512
 #define SSID_ADDR 0
-#define PASS_ADDR 50
-#define DEV_ID 100
-#define SUB_ID 110
-#define USR_ID 145
-#define SCR_NAME 170
-#define GET_INFO_ADDR 199
-#define CONFIG_FLAG_ADDR 200
+#define PASS_ADDR 33
+#define DEV_ID 98
+#define SUB_ID 163
+#define USR_ID 228
+#define SCR_NAME 293
+#define GET_INFO_ADDR 498
+#define CONFIG_FLAG_ADDR 499
 
 // Network and timing constants
 #define WIFI_TIMEOUT 10000        /* WiFi connection timeout in milliseconds */
@@ -57,16 +62,16 @@
 #define DISPLAY_THRESHOLD 145     /* Display readiness threshold */
 #define DISPLAY_RETRY_DELAY 2000  /* Delay between display retries */
 #define DOWNLOAD_DELAY 100        /* Delay after download completion */
-#define EEPROM_STRING_SIZE 32     /* Maximum size for EEPROM strings */
-#define EEPROM_PASS_SIZE 64       /* Maximum size for EEPROM password */
-#define JSON_DOC_SIZE 200         /* JSON document size for parsing */
+#define EEPROM_STRING_SIZE 33     /* Maximum size for EEPROM strings */
+#define EEPROM_PASS_SIZE 65       /* Maximum size for EEPROM password */
+#define JSON_DOC_SIZE 1024         /* JSON document size for parsing */
 #define TIMEOUT_COUNTER 20000     /* Timeout counter for operations */
 
 // API endpoints
 #define API_BASE_URL "https://api.epaperpix.app"
 // TODO: Move API keys to EEPROM or secure storage instead of hardcoding
-#define API_START_ENDPOINT "/epaper2/DSlideShowStart/"   
-#define API_FILE_ENDPOINT "/epaper2/DSlideShow/"     
+#define API_START_ENDPOINT "/epaper2/DSlideShowStart/"
+#define API_FILE_ENDPOINT "/epaper2/DSlideShow/"
 #define API_DEVICE_ENDPOINT "/epaper3/GetDeviceInfo/id/"
 #define BLOB_URL_PRIMARY "https://blob.epaperpix.app/epaperfiles/"
 #define BLOB_URL_SECONDARY "https://epaperstore.blob.core.windows.net/epaperfiles/"
@@ -121,7 +126,7 @@ bool apconnected =false;
 
 struct SlideShowStatus
 {
-  const char *filename;
+  String filename;
   bool gotosleep;
   long secondsdelay;
   bool didcall;
@@ -135,7 +140,9 @@ void setClock() {
 
   USE_SERIAL.print(F("Waiting for NTP time sync: "));
   time_t nowSecs = time(nullptr);
+  unsigned long ntpStarted=millis();
   while (nowSecs < 8 * 3600 * 2) {
+    if(millis()-ntpStarted>=15000UL) { GoToSleep(600); return; }
     delay(500);
     USE_SERIAL.print(F("."));
     yield();
@@ -178,11 +185,11 @@ void setup() {
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
  //  clearCredentials();
- 
+
 
    USE_SERIAL.begin(115200);
 
-   // Do this to clear eeprom 
+   // Do this to clear eeprom
   //  clearEEPROM();
   //   for(;;)
   //   {
@@ -193,20 +200,20 @@ void setup() {
   needDeviceIfo = loadCredentials();
   USE_SERIAL.print("needDeviceIfo =");
   USE_SERIAL.println(needDeviceIfo);
-  
+
   if (epd.Init() != 0) {
     USE_SERIAL.println("Failed to initialize EPD");
     return;
   }
-  
+
   // Enable debug output for troubleshooting
   epd.ShowDebug = true;
-  
+
   //epd.TurnOnDisplay();
 
   //epd.Reset();
-   
-  
+
+
 
 
   print_wakeup_reason();
@@ -214,19 +221,21 @@ void setup() {
     WiFi.onEvent(WiFiEvent);
     WiFi.mode(WIFI_STA);
     WiFiMulti.addAP(storedSSID.c_str(), storedPassword.c_str());
-    
+
     // wait for WiFi connection
     USE_SERIAL.print("Waiting for WiFi to connect...");
     return;
   }
-  
+
   epd.ClearFrame();
   //epd.Clear(0xFF);      // Clear to white background (handles dual-buffer prep)
   epd.QRset(6);    // Draw QR code (single step)
   epd.TurnOnDisplay(); // Refresh display
   startConfigPortal();
-  
-  while(apconnected == false) {
+
+  unsigned long portalWait=millis();
+  while(apconnected == false && millis()-portalWait<300000UL) {
+    server.handleClient();
     USE_SERIAL.print("a");
     delay(200);
   }
@@ -239,7 +248,7 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       USE_SERIAL.println(event);
   switch(event) {
     case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
-     
+
       USE_SERIAL.println("Station connected:");
       break;
     case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:
@@ -257,7 +266,7 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
          USE_SERIAL.println("sta start");
          configComplete = true;
       break;
-    
+
     default:
       break;
   }
@@ -266,173 +275,87 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 
 HTTPClient https;
 
-SlideShowStatus GetStart()
-{
-  SlideShowStatus slideshowstatus;
-  String result = "";
- String message = "{}";
-  
-  //default if errors
-  slideshowstatus.retry =true;
-  slideshowstatus.gotosleep = true;
-  slideshowstatus.secondsdelay = DEFAULT_SLEEP_TIME;
- 
-      USE_SERIAL.print("[HTTPS] begin...\n");
-      String url =String(API_BASE_URL) + String(API_START_ENDPOINT) + String(storedUserId)+String("/") +String(storedScreenName)+String("/")+String("?subscription-key=")+String(storedSubId) ;
-       USE_SERIAL.println(url);
-      if (  https.begin(url ) ) {  
-        USE_SERIAL.print("[HTTPS] POST...\n");
-        // start connection and send HTTP header
-         https.addHeader("Content-Type", "application/json");
-        int httpCode = https.POST(message);
-      
-        if (httpCode > 0) {
-          // HTTP header has been send and Server response header has been handled
-          USE_SERIAL.printf("[HTTPS] POST epaper2... code: %d\n", httpCode);
-  
-          // file found at server
-          if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
-            result = https.getString();
-             USE_SERIAL.println(result.c_str());
-            DeserializationError err = deserializeJson(doc, result.c_str());
-            if (err) {
-                  USE_SERIAL.print(F("deserializeJson() failed: "));
-                  USE_SERIAL.println(err.c_str());
-                   slideshowstatus.gotosleep = true;
-                   slideshowstatus.secondsdelay = RETRY_SLEEP_TIME;
-
-            }else
-            {
-                slideshowstatus.retry = false;
-            
-                slideshowstatus.gotosleep = doc["gotoSleep"];
-                slideshowstatus.secondsdelay = doc["secondsDelay"];
-            
-               
-                USE_SERIAL.println(slideshowstatus.gotosleep);
-                USE_SERIAL.println(slideshowstatus.secondsdelay);
-            }
-
-
-            return slideshowstatus;
-          }
-        } else {
-          USE_SERIAL.printf("[HTTPS] GET... failed, code: %d  error: %s\n",httpCode, https.errorToString(httpCode).c_str());
+// Device-scoped bearer authorization; legacy provisioned devices can still poll with their existing key.
+SlideShowStatus fetchSlide(bool advance) {
+  SlideShowStatus status{};
+  status.retry=true; status.gotosleep=true; status.secondsdelay=60;
+  WiFiClientSecure secure;
+  secure.setCACert(EPAPER_ROOT_CA);
+  HTTPClient request;
+  request.setConnectTimeout(10000); request.setTimeout(15000);
+  String endpoint;
+  bool deviceAuth=validDeviceId(storedDeviceId);
+  if(deviceAuth) endpoint=String(API_BASE_URL)+(advance?"/epaper3/DeviceSlideShow":"/epaper3/DeviceSlideShowStart");
+  else endpoint=String(API_BASE_URL)+(advance?String(API_FILE_ENDPOINT):String(API_START_ENDPOINT))+storedUserId+"/"+storedScreenName;
+  if(!request.begin(secure,endpoint)) return status;
+  request.addHeader("Content-Type","application/json");
+  if(deviceAuth) request.addHeader("Authorization",String("Bearer ")+storedDeviceId);
+  else request.addHeader("Ocp-Apim-Subscription-Key",storedSubId);
+  int code=request.POST("{}");
+  if(code==HTTP_CODE_OK && request.getSize()<=4096) {
+    StaticJsonDocument<1024> result;
+    auto error=deserializeJson(result,request.getString());
+    if(!error && result["gotoSleep"].is<bool>() && result["secondsDelay"].is<long>()) {
+      status.secondsdelay=constrain(result["secondsDelay"].as<long>(),1L,604800L);
+      status.gotosleep=result["gotoSleep"].as<bool>();
+      if(!advance || result["fileName"].is<const char*>()) {
+        status.filename=result["fileName"].as<String>();
+        if(!advance || (status.filename.indexOf('/')<0 && status.filename.indexOf('\\')<0 && status.filename.indexOf("..")<0)) {
+          status.retry=false; status.didcall=true;
         }
-  
-        https.end();
-      } else {
-        USE_SERIAL.printf("[HTTPS] Unable to connect\n");
       }
-
-      // End extra scoping block
-    
-    return slideshowstatus;
+    }
+  }
+  request.end();
+  return status;
 }
-
-SlideShowStatus GetFile()
-{
-  SlideShowStatus slideshowstatus;
-  String result = "";
- String message = "{}";
-  
-  //default if errors
-  slideshowstatus.retry =true;
-  slideshowstatus.gotosleep = true;
-  slideshowstatus.secondsdelay = DEFAULT_SLEEP_TIME;
- 
-      
-      USE_SERIAL.print("[HTTPS] begin...\n");
-      String url =String(API_BASE_URL) + String(API_FILE_ENDPOINT) + String(storedUserId)+String("/") +String(storedScreenName)+String("/")+String("?subscription-key=")+String(storedSubId) ;
-      USE_SERIAL.println(url);
-      if (  https.begin(url) ) {  
-        USE_SERIAL.print("[HTTPS] POST...\n");
-        // start connection and send HTTP header
-         https.addHeader("Content-Type", "application/json");
-    int httpCode = https.POST(message);
-  
-        // httpCode will be negative on error
-        if (httpCode > 0) {
-          // HTTP header has been send and Server response header has been handled
-          USE_SERIAL.printf("[HTTPS] GET... code: %d\n", httpCode);
-  
-          // file found at server
-          if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
-            result = https.getString();
-             USE_SERIAL.println(result.c_str());
-            DeserializationError err = deserializeJson(doc, result.c_str());
-            if (err) {
-                  USE_SERIAL.print(F("deserializeJson() failed: "));
-                  USE_SERIAL.println(err.c_str());
-                   slideshowstatus.gotosleep = true;
-                   slideshowstatus.secondsdelay = RETRY_SLEEP_TIME;
-
-            }else
-            {
-                slideshowstatus.retry = false;
-                slideshowstatus.filename = doc["fileName"];
-                slideshowstatus.gotosleep = doc["gotoSleep"];
-                slideshowstatus.secondsdelay = doc["secondsDelay"];
-                slideshowstatus.didcall = true;
-                USE_SERIAL.println(slideshowstatus.filename);
-                USE_SERIAL.println(slideshowstatus.gotosleep);
-                USE_SERIAL.println(slideshowstatus.secondsdelay);
-            }
+SlideShowStatus GetStart() { return fetchSlide(false); }
 
 
-            return slideshowstatus;
-          }
-        } else {
-          USE_SERIAL.printf("[HTTPS] GET... failed, code: %d  error: %s\n",httpCode, https.errorToString(httpCode).c_str());
-        }
-  
-        https.end();
-      } else {
-        USE_SERIAL.printf("[HTTPS] Unable to connect\n");
-      }
 
-    return slideshowstatus;
-}
+SlideShowStatus GetFile() { return fetchSlide(true); }
 
 void GoToSleep(long seconds)
 {
-  
+
                 WiFi.disconnect(true);
                 WiFi.mode(WIFI_OFF);
                 epd.Sleep();
-                esp_sleep_enable_timer_wakeup(seconds * uS_TO_S_FACTOR);
+                esp_sleep_enable_timer_wakeup(constrain(seconds,1L,604800L) * uS_TO_S_FACTOR);
                 USE_SERIAL.println("Setup ESP32 to sleep for every " + String(seconds) +  " Seconds");
                 USE_SERIAL.println("Going to sleep now");
-                USE_SERIAL.flush(); 
+                USE_SERIAL.flush();
                 esp_deep_sleep_start();
 
 }
 
 int loopcount=0;
 bool once=false;
-SlideShowStatus slideShowStatus;
+SlideShowStatus slideShowStatus{};
 int dstatus=0;
 
 
 void loop() {
   if (!configComplete) {
+    static unsigned long recoveryStarted=millis();
+    if(millis()-recoveryStarted>300000UL) { GoToSleep(600); return; }
+    delay(1);
     // Handle client requests in configuration mode
     server.handleClient();
     return;
-  } 
- 
+  }
+
 
   loopcount++;
    USE_SERIAL.print("Loop = ");
    USE_SERIAL.println(loopcount);
     if(loopcount > LOOP_TIMEOUT) {
-    GoToSleep(TIMEOUT_SLEEP);  
-  }  
+    GoToSleep(TIMEOUT_SLEEP);
+  }
   if(WiFiMulti.run() == WL_CONNECTED) {
-      setClock();  
+      setClock();
       delay(200);
       USE_SERIAL.print("Device Id = ");
-      USE_SERIAL.println(storedDeviceId);
       if(needDeviceIfo)
       {
         delay(2000);
@@ -451,16 +374,16 @@ void loop() {
       USE_SERIAL.println(storedUserId);
       USE_SERIAL.print("Screen Name = ");
       USE_SERIAL.println(storedScreenName);
-      if (storedUserId.length() == 0 || storedScreenName.length() == 0 || storedSubId.length() == 0) {
+      if (storedUserId.length() == 0 || storedScreenName.length() == 0 || (!validDeviceId(storedDeviceId) && storedSubId.length() == 0)) {
         USE_SERIAL.println(" empty  info");
           delay(2000);
-          GoToSleep(TIMEOUT_SLEEP);  
+          GoToSleep(TIMEOUT_SLEEP);
         return;
       }
 
       if(slideShowStatus.didcall == false)
           slideShowStatus = GetStart();
-      while (slideShowStatus.retry)
+      for(int apiAttempt=0; slideShowStatus.retry && apiAttempt<3; ++apiAttempt)
       {
         USE_SERIAL.println("Retry...");
         delay(500);
@@ -473,10 +396,12 @@ void loop() {
 
     if(slideShowStatus.gotosleep == true && wakeup_reason != 0)
       {
-        GoToSleep(slideShowStatus.secondsdelay);  
-      }  
-      slideShowStatus= GetFile(); 
-      if(slideShowStatus.filename != "")
+        GoToSleep(slideShowStatus.secondsdelay);
+      }
+      if(slideShowStatus.retry) { GoToSleep(600); return; }
+      slideShowStatus = GetFile();
+      if(slideShowStatus.retry) { GoToSleep(600); return; }
+      if(!slideShowStatus.retry && slideShowStatus.filename.length()>0)
       {
          for(int i=0;i< MAX_RETRIES ; i++)
         {
@@ -488,9 +413,9 @@ void loop() {
         USE_SERIAL.println(dstatus);
         delay(5000);
             }
-             
+
         }
-       
+
       }else
       {
           epd.Clear(0x1);
@@ -507,202 +432,52 @@ void Download2(String filename)
       String fullPath ="https://epaperstore.blob.core.windows.net/epaperfiles/"+filename;
       USE_SERIAL.println("[fullPath]");
       USE_SERIAL.println(fullPath);
-}      
+}
 
 int DownloadAndDisplay(String filename, long sleepseconds, int retrycnt) {
-  int displaycnt = 0;
-      String fullPath = String(BLOB_URL_PRIMARY) + filename;
-      String fullPath2 = String(BLOB_URL_SECONDARY) + filename;
+  WiFiClientSecure secure;
+  secure.setCACert(EPAPER_ROOT_CA);
+  HTTPClient request;
+  request.setConnectTimeout(10000); request.setTimeout(15000);
+  String url=String(retrycnt>1?BLOB_URL_SECONDARY:BLOB_URL_PRIMARY)+filename;
+  if(!request.begin(secure,url)) return 0;
+  if(request.GET()!=HTTP_CODE_OK) { request.end(); return 0; }
+  long expected=(long)epd.steps*epd.blockSize;
+  if(expected<=0 || request.getSize()!=expected) { request.end(); return -3; }
+  for(int step=0;step<epd.steps;++step) {
+    epd.SendCommand(epd.stepCommands[step]); epd.SetToDataMode();
+    bool complete=readFramePlane(request,epd.blockSize,[&](uint8_t* data,int count) {
+      for(int i=0;i<count;++i) epd.SendDataFast(data[i]);
+    });
+    if(!complete) { request.end(); return -2; }
+  }
+  request.end(); epd.TurnOnDisplay();
+  GoToSleep(sleepseconds); return 1;
+}
 
-      if(retrycnt > 1)
-        fullPath = fullPath2;
-      USE_SERIAL.println("[fullPath]");
-      USE_SERIAL.println(fullPath);
-
-      https.begin(fullPath);
-
-        USE_SERIAL.print("[HTTP] GET...\n");
-        // start connection and send HTTP header
-        int httpCode = https.GET();
-          USE_SERIAL.printf("[HTTPS] A GET... code: %d\n", httpCode);
-        if(httpCode > 0) {
-             USE_SERIAL.printf("[HTTPS] B GET... code: %d\n", httpCode);
-               if(httpCode == HTTP_CODE_OK) {
-
-                // get length of document (is -1 when Server sends no Content-Length header)
-                int len = https.getSize();
-                USE_SERIAL.printf("[HTTPS] Len: %d\n", len);
- 
-               
-                int offset1=0;
-                // create buffer for read
-                uint8_t buff[DOWNLOAD_BUFFER_SIZE] = { 0 };
-                int maxread = sizeof(buff);
-                int timeoutcnt = TIMEOUT_COUNTER;
-                // get tcp stream
-                WiFiClient * stream = https.getStreamPtr();
-                  if(!https.connected())
-                    return -2;
-                 USE_SERIAL.println("Starting display update");
-                 USE_SERIAL.print("Steps: ");
-                 USE_SERIAL.println(epd.steps);
-                 USE_SERIAL.print("Block size: ");
-                 USE_SERIAL.println(epd.blockSize);
-                 
-                 // Use step-based approach like working serial version
-                 for(int step = 0; step < epd.steps; step++) {
-                   long stepLen = epd.blockSize;
-                   epd.SendCommand(epd.stepCommands[step]);
-                   epd.SetToDataMode();
-                   
-                   USE_SERIAL.print("Processing step  BBB ");
-                   USE_SERIAL.print(step);
-                   USE_SERIAL.print(" with ");
-                   USE_SERIAL.print(stepLen);
-                   USE_SERIAL.println(" bytes");
-                   
-                   if (len == -1) {
-                     // Unknown length - read all available data
-                     while (https.connected() && (stream->available() || stream->connected()) && stepLen > 0) {
-                       size_t size = stream->available();
-                       if (size > 0) {
-                         size_t readBytes = stream->readBytes(buff, min(size, min((size_t)sizeof(buff), (size_t)stepLen)));
-                         for(int i = 0; i < readBytes; i++) {
-                            if(step==0) 
-                             
-                              epd.SendDataFast(buff[i]);
-                            
-                            else
-                             epd.SendDataFast(buff[i]);
-                         }
-                         stepLen -= readBytes;
-                         offset1 += readBytes;
-                       }
-                       delay(1);
-                     }
-                   } else {
-                     // Known length - read exactly what we need
-                     while(https.connected() && len > 0 && stepLen > 0) {
-                       size_t size = stream->available();
-                       if(size) {
-                         int c = stream->readBytes(buff, min(size, min(sizeof(buff), min((size_t)len, (size_t)stepLen))));
-                         for(int i = 0; i < c; i++) {
-                           if(step==0) 
-                              
-                              epd.SendDataFast(buff[i]);
-                            
-                            else
-                             epd.SendDataFast(buff[i]);
-                         
-                         }
-                         offset1 += c;
-                         stepLen -= c;
-                         if(len > 0) {
-                           len -= c;
-                         }
-                       } else {
-                         timeoutcnt--;
-                         delay(2);
-                       }
-                       delay(1);
-                     }
-                   }
-                 }
-          
-
-
-                USE_SERIAL.println();
-                USE_SERIAL.printf("Total bytes processed: %d\n", offset1);
-                USE_SERIAL.print("[HTTP] connection closed or file end.\n");
-                delay(DOWNLOAD_DELAY);
-                
-                // Turn on display to show the downloaded image
-                USE_SERIAL.println("Turning on display...");
-                epd.TurnOnDisplay();
-                USE_SERIAL.println("Display updated successfully");
-                
-                WiFi.disconnect(true);
-                WiFi.mode(WIFI_OFF);
-                USE_SERIAL.println("GoToSleep");
-                GoToSleep(sleepseconds);
-                  
-             
-          return 1;
-        }  
-      }
-        return 0;
-  }        
 
 int getDeviceInfo(String deviceId) {
-     String result = "";
-
-       USE_SERIAL.print("[HTTPS] begin...\n");
-      if (  https.begin(String(API_BASE_URL) + String(API_DEVICE_ENDPOINT)+String(deviceId) ) ) {  
-        USE_SERIAL.print("[HTTPS] GET...\n");
-        // start connection and send HTTP header
-        // https.addHeader("Content-Type", "application/json");
-        int httpCode = https.GET();
-      
-        if (httpCode > 0) {
-          // HTTP header has been send and Server response header has been handled
-          USE_SERIAL.printf("[HTTPS] GET epaper3... code: %d\n", httpCode);
-  
-          // file found at server
-          if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
-            result = https.getString();
-             USE_SERIAL.println(result.c_str());
-            DeserializationError err = deserializeJson(doc, result.c_str());
-            if (err) {
-                  USE_SERIAL.print(F("deserializeJson() failed: "));
-                  USE_SERIAL.println(err.c_str());
-                  return 0;
-
-            } else {
-                // Check if required fields exist in JSON response
-                if (doc.containsKey("AccountID") && doc.containsKey("SlideShowId") && doc.containsKey("subscriptionKey")) {
-                    // Safely extract values with null checks
-                    const char* accountId = doc["AccountID"];
-                    const char* slideShowId = doc["SlideShowId"];
-                    const char* subscriptionKey = doc["subscriptionKey"];
-                    
-                    if (accountId != nullptr && slideShowId != nullptr && subscriptionKey != nullptr) {
-                        storedUserId = String(accountId);
-                        storedScreenName = String(slideShowId);
-                        storedSubId = String(subscriptionKey);
-                        
-                        USE_SERIAL.println("Device info extracted successfully:");
-                        USE_SERIAL.print("AccountID: ");
-                        USE_SERIAL.println(storedUserId);
-                        USE_SERIAL.print("SlideShowId: ");
-                        USE_SERIAL.println(storedScreenName);
-                        USE_SERIAL.print("SubscriptionKey: ");
-                        USE_SERIAL.println(storedSubId);
-                        
-                        saveDeviceInfo(storedSubId, storedUserId, storedScreenName);
-                    } else {
-                        USE_SERIAL.println("Error: One or more fields contain null values");
-                    }
-                } else {
-                    USE_SERIAL.println("Error: Missing required fields in JSON response");
-                    USE_SERIAL.println("Expected fields: AccountID, SlideShowId, subscriptionKey");
-                }
-            }
-
-
-            return 1;
-          }
-        } else {
-          USE_SERIAL.printf("[HTTPS] GET... failed, code: %d  error: %s\n",httpCode, https.errorToString(httpCode).c_str());
-          return -2;
-        }
-  
-        https.end();
-      } else {
-        USE_SERIAL.printf("[HTTPS] Unable to connect\n");
-         return -1;
-      }
-
+  if(!validDeviceId(deviceId)) return 0;
+  WiFiClientSecure secure;
+  secure.setCACert(EPAPER_ROOT_CA);
+  HTTPClient request;
+  request.setConnectTimeout(10000); request.setTimeout(15000);
+  if(!request.begin(secure,String(API_BASE_URL)+"/epaper3/DeviceInfo")) return 0;
+  request.addHeader("Authorization",String("Bearer ")+deviceId);
+  request.addHeader("Content-Type","application/json");
+  int code=request.POST("{}");
+  bool valid=false;
+  if(code==HTTP_CODE_OK && request.getSize()<=4096) {
+    StaticJsonDocument<1024> result;
+    if(!deserializeJson(result,request.getString()) && result["AccountID"].is<const char*>() && result["SlideShowId"].is<const char*>()) {
+      String user=result["AccountID"].as<String>(), screen=result["SlideShowId"].as<String>();
+      valid=user.length()>0 && user.length()<=64 && screen.length()>0 && screen.length()<=64;
+      if(valid) { saveDeviceInfo("",user,screen); needDeviceIfo=0; }
+    }
+  }
+  request.end(); return valid?1:0;
 }
+
 
 void startConfigPortal() {
   // Set up Access Point
@@ -723,191 +498,80 @@ void startConfigPortal() {
   }
   USE_SERIAL.print("Then access the configuration page at: http://");
   USE_SERIAL.println(IP);
-  
+
   // Set up web server routes
   server.on("/", HTTP_GET, handleRoot);
   server.on("/save", HTTP_POST, handleSave);
   server.on("/reset", HTTP_GET, handleReset);
   server.onNotFound(handleNotFound);
-  
+
   // Start the server
   server.begin();
   USE_SERIAL.println("HTTP server started");
 }
 
+// Version 2 uses disjoint, null-terminated slots. Read legacy data before writing any new slot.
+String readSetting(int address, int capacity) {
+  String value;
+  for (int i=0; i<capacity; ++i) {
+    byte c=EEPROM.read(address+i);
+    if (c==0) return value;
+    if (c==255 || c<32) return String();
+    value += char(c);
+  }
+  return String(); // No terminator: legacy overlap or invalid record.
+}
+void writeSetting(int address, int capacity, const String& value) {
+  for(int i=0;i<capacity;++i) EEPROM.write(address+i, i<value.length()?value[i]:0);
+}
+bool validDeviceId(const String& value) {
+  if(value.length()!=32) return false;
+  for(unsigned i=0;i<value.length();++i) if(!isxdigit(value[i])) return false;
+  return true;
+}
+void migrateLegacySettings() {
+  if(EEPROM.read(500)==0xE2 && EEPROM.read(501)==2) return;
+  bool valid=EEPROM.read(200)==1;
+  bool needInfo=EEPROM.read(199)==1;
+  String ssid=readSetting(0,33), pass=readSetting(50,50), device=readSetting(100,10);
+  String sub=readSetting(110,35), user=readSetting(145,25), screen=readSetting(170,29);
+  // Corrupted legacy fields cannot be reconstructed. Require provisioning in that case.
+  valid=valid && (pass.length()>0 || EEPROM.read(50)==0) && ssid.length()>0 && device.length()>0 && !needInfo && sub.length()>0 && user.length()>0 && screen.length()>0;
+  writeSetting(SSID_ADDR,33,ssid); writeSetting(PASS_ADDR,65,pass); writeSetting(DEV_ID,65,device);
+  writeSetting(SUB_ID,65,sub); writeSetting(USR_ID,65,user); writeSetting(SCR_NAME,65,screen);
+  EEPROM.write(GET_INFO_ADDR,0); EEPROM.write(CONFIG_FLAG_ADDR,valid?1:0);
+  EEPROM.write(500,0xE2); EEPROM.write(501,2); EEPROM.commit();
+}
 int loadCredentials() {
-  // Check if we have saved credentials (marked by flag at CONFIG_FLAG_ADDR)
-  if (EEPROM.read(CONFIG_FLAG_ADDR) == 1) {
-    // Read SSID
-    storedSSID = "";
-    for (int i = 0; i < EEPROM_STRING_SIZE; i++) {
-      char c = EEPROM.read(SSID_ADDR + i);
-      if (c == 0) break;
-      storedSSID += c;
-    }
-    
-    // Read Password
-    storedPassword = "";
-    for (int i = 0; i < 50; i++) {
-      char c = EEPROM.read(PASS_ADDR + i);
-      if (c == 0) break;
-      storedPassword += c;
-    }
-     // Read DeviceId 
-    storedDeviceId = "";
-    for (int i = 0; i < 50; i++) {
-      char c = EEPROM.read(DEV_ID + i);
-      if (c == 0) break;
-      storedDeviceId += c;
-    }
-
-      if (EEPROM.read(GET_INFO_ADDR) == 1) {
-          return 1; // need to read device info;
-      }
- // Read Subcription id 
-    storedSubId = "";
-    for (int i = 0; i < 50; i++) {
-      char c = EEPROM.read(SUB_ID + i);
-      if (c == 0) break;
-      storedSubId += c;
-    }
-
-    // Read UserID
-    storedUserId = "";
-    for (int i = 0; i < 50; i++) {
-      char c = EEPROM.read(USR_ID + i);
-      if (c == 0) break;
-      storedUserId += c;
-    }
-
-    // Read UserID
-    storedScreenName = "";
-    for (int i = 0; i < 50; i++) {
-      char c = EEPROM.read(SCR_NAME + i);
-      if (c == 0) break;
-      storedScreenName += c;
-    }
-
-
-    USE_SERIAL.println("Loaded credentials from EEPROM:");
-    USE_SERIAL.print("SSID: ");
-    USE_SERIAL.println(storedSSID);
-    USE_SERIAL.print("storedUserId: ");
-    USE_SERIAL.println(storedUserId);
-    USE_SERIAL.println("Password: [hidden]");
-
-    return 0;
-  } else {
-    USE_SERIAL.println("No saved credentials found in EEPROM");
-  }
-  return -1;
+  migrateLegacySettings();
+  storedSSID=readSetting(SSID_ADDR,33); storedPassword=readSetting(PASS_ADDR,65);
+  storedDeviceId=readSetting(DEV_ID,65); storedSubId=readSetting(SUB_ID,65);
+  storedUserId=readSetting(USR_ID,65); storedScreenName=readSetting(SCR_NAME,65);
+  if(EEPROM.read(CONFIG_FLAG_ADDR)!=1) return -1;
+  return EEPROM.read(GET_INFO_ADDR)==1?1:0;
 }
 
 
-void saveCredentials(String ssid, String password,String deviceId) {
-  // Input validation
-  if (ssid.length() == 0 || ssid.length() > EEPROM_STRING_SIZE - 1) {
-    USE_SERIAL.println("Invalid SSID length");
-    return;
-  }
-  
-  if (password.length() > EEPROM_PASS_SIZE - 1) {
-    USE_SERIAL.println("Password too long");
-    return;
-  }
-  
-  // Clear areas
-  for (int i = 0; i < EEPROM_STRING_SIZE; i++)
-    EEPROM.write(SSID_ADDR + i, 0);
-  for (int i = 0; i < EEPROM_PASS_SIZE; i++)
-    EEPROM.write(PASS_ADDR + i, 0);
-  
-  // Write SSID
-  for (int i = 0; i < ssid.length(); i++)
-    EEPROM.write(SSID_ADDR + i, ssid[i]);
-  
-  // Write Password
-  for (int i = 0; i < password.length(); i++)
-    EEPROM.write(PASS_ADDR + i, password[i]);
 
-  // Write deviceId
-  for (int i = 0; i < deviceId.length(); i++)
-    EEPROM.write(DEV_ID + i, deviceId[i]);
-  
-  
-  // Set  flag to get device info
-  EEPROM.write(GET_INFO_ADDR, 1);
-  // Set configuration flag
-  EEPROM.write(CONFIG_FLAG_ADDR, 1);
-  
-  // Commit changes to EEPROM
-  EEPROM.commit();
-  
-  USE_SERIAL.println("Saved credentials to EEPROM:");
-  USE_SERIAL.print("SSID: ");
-  USE_SERIAL.println(ssid);
-  USE_SERIAL.println("Password: [hidden]");
-  
-  storedSSID = ssid;
-  storedPassword = password;
-  storedDeviceId = deviceId;
+void saveCredentials(String ssid, String password, String deviceId) {
+  if(ssid.length()==0 || ssid.length()>32 || password.length()>64 || !validDeviceId(deviceId)) return;
+  writeSetting(SSID_ADDR,33,ssid); writeSetting(PASS_ADDR,65,password); writeSetting(DEV_ID,65,deviceId);
+  writeSetting(SUB_ID,65,""); writeSetting(USR_ID,65,""); writeSetting(SCR_NAME,65,"");
+  EEPROM.write(GET_INFO_ADDR,1); EEPROM.write(CONFIG_FLAG_ADDR,1);
+  EEPROM.write(500,0xE2); EEPROM.write(501,2); EEPROM.commit();
+  storedSSID=ssid; storedPassword=password; storedDeviceId=deviceId;
+  storedUserId=""; storedScreenName=""; storedSubId="";
 }
+
 
 
 void saveDeviceInfo(String subscriptionId, String userId, String screenName) {
-  // Input validation
-  if (subscriptionId.length() == 0 || userId.length() == 0 || screenName.length() == 0) {
-    USE_SERIAL.println("Error: Cannot save empty device info");
-    return;
-  }
-  
-  if (subscriptionId.length() > 50 || userId.length() > 50 || screenName.length() > 50) {
-    USE_SERIAL.println("Error: Device info fields too long");
-    return;
-  }
-  
-  // Clear existing data first
-  for (int i = 0; i < 50; i++) {
-    EEPROM.write(SUB_ID + i, 0);
-    EEPROM.write(USR_ID + i, 0);
-    EEPROM.write(SCR_NAME + i, 0);
-  }
-  
-  // Write subscriptionId
-  for (int i = 0; i < subscriptionId.length(); i++)
-    EEPROM.write(SUB_ID + i, subscriptionId[i]);
-  
-  // Write userId
-  for (int i = 0; i < userId.length(); i++)
-    EEPROM.write(USR_ID + i, userId[i]);
-
-  // Write screenName
-  for (int i = 0; i < screenName.length(); i++)
-    EEPROM.write(SCR_NAME + i, screenName[i]);
-  
-  
-  // Reset  flag to get device info
-  EEPROM.write(GET_INFO_ADDR,0);
-  // Set configuration flag
-  EEPROM.write(CONFIG_FLAG_ADDR, 1);
-  
-  // Commit changes to EEPROM
-  EEPROM.commit();
-  
-  USE_SERIAL.println("Saved device info to EEPROM:");
-  USE_SERIAL.print("subscriptionId: ");
-  USE_SERIAL.println(subscriptionId);
-   USE_SERIAL.print("userId: ");
-  USE_SERIAL.println(userId);
-   USE_SERIAL.print("screenName: ");
-  USE_SERIAL.println(screenName);
-  USE_SERIAL.println("Password: [hidden]");
-  
-  storedSubId = subscriptionId;
-  storedUserId = userId;
-  storedScreenName = screenName;
-
+  if(userId.length()==0 || screenName.length()==0 || userId.length()>64 || screenName.length()>64 || subscriptionId.length()>64) return;
+  writeSetting(SUB_ID,65,subscriptionId); writeSetting(USR_ID,65,userId); writeSetting(SCR_NAME,65,screenName);
+  EEPROM.write(GET_INFO_ADDR,0); EEPROM.write(CONFIG_FLAG_ADDR,1); EEPROM.commit();
+  storedSubId=subscriptionId; storedUserId=userId; storedScreenName=screenName;
 }
+
 
 void clearCredentials() {
   // Clear the configuration flag
@@ -919,7 +583,7 @@ void clearCredentials() {
   // storedSubId= "";
   // storedScreenName ="";
   // storedDeviceId = "";
-  
+
   USE_SERIAL.println("Cleared  Wifi Credentials");
 }
 
@@ -940,24 +604,24 @@ void clearEEPROM() {
   storedSubId= "";
   storedScreenName ="";
   storedDeviceId = "";
-  
+
   USE_SERIAL.println("Cleared  EEPROM");
 }
 
 void handleRoot() {
   String html;
   char buffer[2048];
-  
+
   // Build HTML header with style
   sprintf(buffer, HTML_HEADER, HTML_STYLE);
   html = String(buffer);
-  
+
   html += "<h1>WiFi Setup</h1>";
-  
+
   if (storedSSID.length() > 0 && EEPROM.read(CONFIG_FLAG_ADDR) == 1) {
     html += "<div class=\"status success\">Currently configured WiFi: <strong>" + storedSSID + "</strong></div>";
   }
-  
+
   html += "<form action=\"/save\" method=\"POST\">";
   html +="<label for=\"wifi-ssid\">Wi-Fi Name (SSID)</label>";
   html +="<input type=\"text\" id=\"wifi-ssid\" name=\"username\" autocomplete=\"username\" placeholder=\"MyHomeWiFi\">";
@@ -975,7 +639,7 @@ void handleRoot() {
   html += "</div></form>";
   html += "<p><small>After saving, this device will attempt to connect to your WiFi network.</small></p>";
   html += FPSTR(HTML_FOOTER);
-  
+
   server.send(200, "text/html", html);
 }
 
@@ -984,23 +648,25 @@ void handleSave() {
     String ssid = server.arg("username");
     String password = server.arg("wifi-password");
     String deviceid = server.arg("device-id");
-    
+    deviceid.trim();
+    if(!validDeviceId(deviceid)) { server.send(400,"text/plain","Enter the 32-character device code from the portal"); return; }
+
     // Input validation and sanitization
     ssid.trim();
-    password.trim();
+    // Password whitespace is significant.
     deviceid.trim();
-    
-    if (ssid.length() > 0 && ssid.length() <= EEPROM_STRING_SIZE - 1 && 
+
+    if (ssid.length() > 0 && ssid.length() <= EEPROM_STRING_SIZE - 1 &&
         password.length() <= EEPROM_PASS_SIZE - 1) {
       saveCredentials(ssid, password,deviceid);
-      
+
       String html;
       char buffer[2048];
-      
+
       // Build HTML header with style
       sprintf(buffer, HTML_HEADER, HTML_STYLE);
       html = String(buffer);
-      
+
       html += "<meta http-equiv=\"refresh\" content=\"10;url=/\">";
       html += "<h1>WiFi Setup</h1>";
       html += "<div class=\"status success\">WiFi credentials saved! Attempting to connect...</div>";
@@ -1008,21 +674,21 @@ void handleSave() {
       html += "<p>If connection fails, the configuration portal will remain active.</p>";
       html += "<p>This page will refresh in 10 seconds...</p>";
       html += FPSTR(HTML_FOOTER);
-      
+
       server.send(200, "text/html", html);
-      
+
       // Attempt to connect with new credentials
       delay(500);
       WiFi.mode(WIFI_STA);
       WiFi.begin(ssid.c_str(), password.c_str());
-      
+
       long startAttemptTime = millis();
       while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < WIFI_TIMEOUT) {
         delay(500);
         USE_SERIAL.print(".");
       }
       USE_SERIAL.println();
-      
+
       if (WiFi.status() == WL_CONNECTED) {
         USE_SERIAL.println("Connected to WiFi!");
         USE_SERIAL.print("IP address: ");
@@ -1047,20 +713,20 @@ void handleSave() {
 
 void handleReset() {
   clearCredentials();
-  
+
   String html;
   char buffer[2048];
-  
+
   // Build HTML header with style
   sprintf(buffer, HTML_HEADER, HTML_STYLE);
   html = String(buffer);
-  
+
   html += "<meta http-equiv=\"refresh\" content=\"3;url=/\">";
   html += "<h1>WiFi Setup</h1>";
   html += "<div class=\"status info\">WiFi credentials have been reset.</div>";
   html += "<p>Redirecting back to setup page in 3 seconds...</p>";
   html += FPSTR(HTML_FOOTER);
-  
+
   server.send(200, "text/html", html);
 }
 

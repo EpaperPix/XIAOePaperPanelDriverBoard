@@ -28,6 +28,7 @@
 # THE SOFTWARE.
 #
 ******************************************************************************/
+#include "display_config.h"
 #ifdef EPD3IN97G_C
 
 #include <stdlib.h>

@@ -7,7 +7,7 @@
 // #define EPD7IN5B_C      // 7.5" B/W/Red
 // #define EPD7IN5_V2_C    // 7.5" Monochrome
 // #define EPD7IN3F_C      // 7.3" Color
-#define EPD4IN01F_C     // 4.01" Color
+#include "display_config.h"
 
 #include <SPI.h>
 #include <Arduino.h>
@@ -46,42 +46,30 @@ void setup() {
 
 
 void loop() {
-  char byte1;
-  unsigned long len;
-  unsigned long cnt = 0;
-
-  
-  USE_SERIAL.println("Waiting for data...");
-  USE_SERIAL.print("Steps: ");
-  USE_SERIAL.println(epd.steps);
-  USE_SERIAL.print("Block size: ");
-  USE_SERIAL.println(epd.blockSize);
-  epd.SendCommand(0x24); 
-  for(int i = 0; i < epd.steps; i++) {
-    len = epd.blockSize;
-    epd.SendCommand(epd.stepCommands[i]);
-    epd.SetToDataMode();
-    
-    while (len > 0) {
-      if (USE_SERIAL.available() > 0) {
-        byte1 = USE_SERIAL.read();
-        if(i==0)
-          byte1 = ~byte1;
-
-        epd.SendDataFast(byte1);
-        len--;
-        cnt++;
-      } else {
-        if (cnt == 0) {
-          USE_SERIAL.print(".");
-          delay(10);
-        }
+  if(USE_SERIAL.available()==0) { delay(1); return; }
+  unsigned long started=millis(), lastByte=started;
+  unsigned long budget=30000UL+(unsigned long)(epd.steps*epd.blockSize)*10000UL/115200UL;
+  for(int plane=0;plane<epd.steps;++plane) {
+    epd.SendCommand(epd.stepCommands[plane]); epd.SetToDataMode();
+    unsigned long remaining=epd.blockSize;
+    while(remaining>0) {
+      if(USE_SERIAL.available()>0) {
+        unsigned char value=(unsigned char)USE_SERIAL.read();
+        epd.SendDataFast(epd.EncodePixelByte(value,plane));
+        --remaining; lastByte=millis();
+      } else delay(1);
+      if(millis()-lastByte>15000UL || millis()-started>budget) {
+        USE_SERIAL.println("ERROR incomplete frame. Stop sending; wait for Ready; resend the entire frame.");
+        // Drain a late tail for a bounded interval. The sender waits for Ready before restarting.
+        unsigned long drainStarted=millis();
+        while(millis()-drainStarted<1000UL) { while(USE_SERIAL.available()>0) USE_SERIAL.read(); delay(1); }
+        epd.Init();
+        USE_SERIAL.println("Ready");
+        return;
       }
     }
   }
- 
- epd.TurnOnDisplay();
-  
- // epd.TurnOnDisplay();
-  USE_SERIAL.println("\nDisplay updated");
+  epd.TurnOnDisplay();
+  USE_SERIAL.println("Display updated");
+  USE_SERIAL.println("Ready");
 }

@@ -29,6 +29,7 @@
  *  SOFTWARE.
  */
 
+#include "display_config.h"
 #ifdef EPD2IN9_C
 
 #include <stdlib.h>

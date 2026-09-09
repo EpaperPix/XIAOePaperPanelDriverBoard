@@ -28,6 +28,7 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  */
+#include "display_config.h"
 #ifdef EPD7IN5B_C
 #include <stdlib.h>
 #include "epd_base.h"

@@ -28,10 +28,10 @@ void Epd::QRset( int scale) {
     if(bits_per_pixel == 4) {
         // 4.01" color needs resolution setup before data transmission
         SendCommand(0x61);  // Set resolution
-        SendData(0x02);     // Width high byte (640 = 0x0280)
-        SendData(0x80);     // Width low byte
-        SendData(0x01);     // Height high byte (400 = 0x0190)
-        SendData(0x90);     // Height low byte
+        SendData(width >> 8);
+        SendData(width & 0xff);
+        SendData(height >> 8);
+        SendData(height & 0xff);
         
         if(ShowDebug) {
             Serial.println("QRset: Set resolution for 4-bit color display");

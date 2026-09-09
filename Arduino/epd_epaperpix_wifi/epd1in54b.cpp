@@ -53,6 +53,7 @@
  
  */
 
+#include "display_config.h"
 #ifdef EPD1IN54B_C
 
 #include <stdlib.h>

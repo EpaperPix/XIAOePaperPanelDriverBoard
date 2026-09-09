@@ -28,10 +28,10 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  */
+#include "display_config.h"
 #ifdef EPD4IN01F_C
 #include <stdlib.h>
 #include "epd_base.h"
-#include "qrset.cpp"
 
 // Display resolution
 #define EPD_WIDTH       640

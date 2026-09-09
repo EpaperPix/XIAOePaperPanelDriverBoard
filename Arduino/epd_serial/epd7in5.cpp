@@ -29,6 +29,7 @@
  *  SOFTWARE.
  */
 
+#include "display_config.h"
 #ifdef EPD7IN5_C
 
 #include <stdlib.h>

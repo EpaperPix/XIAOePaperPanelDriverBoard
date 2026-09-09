@@ -29,7 +29,8 @@
  *  SOFTWARE.
  */
 
-#ifndef EPD7IN5_V2_C
+#include "display_config.h"
+#ifdef EPD7IN5_V2_C
 
 
 #include <stdlib.h>
@@ -40,7 +41,7 @@
 #define EPD_WIDTH       800
 #define EPD_HEIGHT      480
 #define EPD_STEPS      1
-#define EPD_BLOCK_SIZE  96000
+#define EPD_BLOCK_SIZE  48000
 
 // Pixel format for this display
 #define EPD_BITS_PER_PIXEL 1    // Monochrome: 1 byte per pixel  

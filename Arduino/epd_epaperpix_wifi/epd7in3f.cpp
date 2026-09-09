@@ -30,6 +30,7 @@
  *  SOFTWARE.
  */
 
+#include "display_config.h"
 #ifdef EPD7IN3F_C
 
 #include <stdlib.h>

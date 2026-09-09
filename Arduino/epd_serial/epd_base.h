@@ -50,14 +50,15 @@ public:
     void SetFrameStart(char mode, unsigned char command);
     void SendBuffer(unsigned char* buffer, int size);
     bool ShowDebug;
+    unsigned char EncodePixelByte(unsigned char value, int plane) const { return bits_per_pixel==1 && plane==0 ? (unsigned char)~value : value; }
 private:
     unsigned int reset_pin;
     unsigned int dc_pin;
     unsigned int cs_pin;
     unsigned int busy_pin;
-    unsigned char bits_per_pixel;
-    unsigned char pixels_per_byte;
-    unsigned char qr_color;
+    unsigned char bits_per_pixel = 1;
+    unsigned char pixels_per_byte = 8;
+    unsigned char qr_color = 0;
 
 };
 
