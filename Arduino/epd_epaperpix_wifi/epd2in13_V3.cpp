@@ -39,7 +39,34 @@
 #define EPD_WIDTH       122
 #define EPD_HEIGHT      250
 #define EPD_STEPS      1
-#define EPD_BLOCK_SIZE  3812
+#define EPD_BLOCK_SIZE  4000  // 16 bytes per 122-px row * 250 rows
+
+// SSD1680 RAM window and address counter (Waveshare EPD_2in13_V3_SetWindows/SetCursor).
+// Restored before every WRITE_RAM (see SendCommand) so each frame, and a retry after a
+// partial download, starts at RAM 0,0.
+static void writeCommandRaw(unsigned char command) {
+    EpdIf::DigitalWrite(DC_PIN, LOW);
+    EpdIf::SpiTransfer(command);
+}
+static void writeDataRaw(unsigned char data) {
+    EpdIf::DigitalWrite(DC_PIN, HIGH);
+    EpdIf::SpiTransfer(data);
+}
+static void setWindowAndCursor() {
+    writeCommandRaw(0x44);              // RAM X start/end, in bytes
+    writeDataRaw(0x00);
+    writeDataRaw(((EPD_WIDTH - 1) >> 3) & 0xFF);
+    writeCommandRaw(0x45);              // RAM Y start/end
+    writeDataRaw(0x00);
+    writeDataRaw(0x00);
+    writeDataRaw((EPD_HEIGHT - 1) & 0xFF);
+    writeDataRaw(((EPD_HEIGHT - 1) >> 8) & 0xFF);
+    writeCommandRaw(0x4E);              // RAM X counter
+    writeDataRaw(0x00);
+    writeCommandRaw(0x4F);              // RAM Y counter
+    writeDataRaw(0x00);
+    writeDataRaw(0x00);
+}
 
 Epd::~Epd()
 {
@@ -60,13 +87,14 @@ Epd::Epd()
 
 void Epd::SendCommand(unsigned char command)
 {
+    if (command == 0x24) setWindowAndCursor();
     DigitalWrite(dc_pin, LOW);
     SpiTransfer(command);
 }
 
 void Epd::SendData(unsigned char data)
 {
-     DigitalWrite(dc_pin, LOW);
+    DigitalWrite(dc_pin, HIGH);
     SpiTransfer(data);
 }
 
@@ -107,6 +135,8 @@ int Epd::Init(void)
 
     SendCommand(0x11); //data entry mode
     SendData(0x03);
+
+    setWindowAndCursor();
 
     SendCommand(0x3C); //BorderWavefrom
     SendData(0x05);	

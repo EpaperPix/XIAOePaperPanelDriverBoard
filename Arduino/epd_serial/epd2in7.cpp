@@ -347,6 +347,19 @@ const unsigned char lut_wb[] =
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
+void Epd::ClearFrame(void) {
+    SendCommand(DATA_START_TRANSMISSION_1);
+    SetToDataMode();
+    for(unsigned long i=0; i<(unsigned long)width*height/8; i++) {
+        SendData(0xFF);
+    }
+    SendCommand(DATA_START_TRANSMISSION_2);
+    SetToDataMode();
+    for(unsigned long i=0; i<(unsigned long)width*height/8; i++) {
+        SendData(0xFF);
+    }
+}
+
 #endif
 
 /* END OF FILE */

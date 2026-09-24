@@ -36,13 +36,13 @@
 #include <Arduino.h>
 #include <SPI.h>
 
-#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3
+#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C6
 #define VSPI FSPI
 #endif
 
 // Pin definitions for different platforms
-#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C3
-  // ESP32-S2/S3 specific definitions
+#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+  // SeeedStudio XIAO ESP32-S2/S3/C3/C6 specific definitions
  // #define VSPI FSPI
 
  // Pin definition SeeedStudio ePaper Breakout XIAO  

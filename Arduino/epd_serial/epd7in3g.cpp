@@ -194,25 +194,26 @@ void Epd::TurnOnDisplay(void)
 }
 
 
-void Epd::Clear()
+/******************************************************************************
+function :	Fill the frame buffer with white (colour 1) without refreshing
+parameter:
+******************************************************************************/
+void Epd::ClearFrame(void)
 {
     int Width, Height;
     Width = (width % 4 == 0)? (width / 4 ): (width / 4 + 1);
     Height = height;
-    
     SendCommand(0x04);
     WaitUntilIdle();
-
     SendCommand(0x10);
     SetToDataMode();
     for (int j = 0; j < Height; j++) {
         for (int i = 0; i < Width; i++) {
-            SendData(0);
+            SendData(0x55);
         }
     }
-
-    TurnOnDisplay();
 }
+
 /******************************************************************************
 function :	Clear screen
 parameter:

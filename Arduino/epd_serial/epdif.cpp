@@ -33,7 +33,7 @@
 #include "epdif.h"
 #include <SPI.h>
 
-#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3  || CONFIG_IDF_TARGET_ESP32C3
+#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3  || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
 static const int spiClk = 1000000; // 1 MHz
 SPIClass *vspi;
 #endif
@@ -68,8 +68,8 @@ int EpdIf::IfInit(void) {
     DigitalWrite(PWR_PIN, 1);
 #endif
 
-#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3  || CONFIG_IDF_TARGET_ESP32C3
-    // ESP32-S2/S3 specific pin setup
+#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3  || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+    // XIAO ESP32-S2/S3/C3/C6 specific pin setup
     pinMode(PIN_SPI_SCK, OUTPUT);
     pinMode(PIN_SPI_DIN, OUTPUT);
     digitalWrite(PIN_SPI_CS, HIGH);
@@ -93,7 +93,7 @@ int EpdIf::IfInit(void) {
 
 void EpdIf::SpiTransfer(unsigned char data) {
     digitalWrite(CS_PIN, LOW);
-#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C3
+#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
     vspi->transfer(data);
 #else
     SPI.transfer(data);

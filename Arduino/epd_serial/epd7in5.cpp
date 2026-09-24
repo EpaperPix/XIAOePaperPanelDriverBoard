@@ -140,6 +140,10 @@ void Epd::SendData(unsigned char data) {
     SpiTransfer(data);
 }
 
+void Epd::SendDataFast(unsigned char data) {
+    SpiTransfer(data);
+}
+
 void Epd::SetToDataMode() {
     DigitalWrite(dc_pin, HIGH);
 }
@@ -189,6 +193,17 @@ void Epd::Sleep(void) {
     WaitUntilIdle();
     SendCommand(DEEP_SLEEP);
     SendData(0xa5);
+}
+
+/**
+ *  @brief: fill the frame buffer with white without refreshing (Waveshare Clear())
+ */
+void Epd::ClearFrame(void) {
+    SendCommand(DATA_START_TRANSMISSION_1);
+    SetToDataMode();
+    for(unsigned long i=0; i<(unsigned long)width/2*height; i++) {
+        SendData(0x33);
+    }
 }
 
 #endif

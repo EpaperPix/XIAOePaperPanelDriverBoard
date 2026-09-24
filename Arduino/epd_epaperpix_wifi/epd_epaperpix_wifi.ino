@@ -4,7 +4,7 @@
  */
 
 /**
-************Currently set to EPD7IN5_V2_C********************
+************Currently set to EPD2IN9_C (2.9inch V1, SSD1608) via display_config.h on the SeeedStudio ePaper Driver board; XIAO ESP32-S3/C3/C6********************
 */
 
 
@@ -48,7 +48,8 @@ bool validDeviceId(const String& value);
 #define CONFIG_FLAG_ADDR 499
 
 // Network and timing constants
-#define WIFI_TIMEOUT 10000        /* WiFi connection timeout in milliseconds */
+#define WIFI_TIMEOUT 20000        /* Portal credential test timeout in milliseconds */
+#define WIFI_FAIL_CYCLES_FOR_PORTAL 3 /* Consecutive wakes without WiFi before the portal reopens */
 #define RETRY_DELAY 500           /* Delay between retries in milliseconds */
 #define LOOP_DELAY 10000          /* Main loop delay in milliseconds */
 #define DOWNLOAD_BUFFER_SIZE 128  /* Buffer size for downloading data */
@@ -123,6 +124,9 @@ String storedSubId = "";
 String storedScreenName = "";
 bool configComplete = false;
 bool apconnected =false;
+// Survives deep sleep, cleared by a power cycle: consecutive wakes that never reached WiFi.
+RTC_DATA_ATTR int wifiFailCycles = 0;
+bool wifiConnectedThisWake = false;
 
 struct SlideShowStatus
 {
@@ -217,7 +221,15 @@ void setup() {
 
 
   print_wakeup_reason();
-  if (storedSSID.length() > 0 && EEPROM.read(CONFIG_FLAG_ADDR) == 1) {
+  // Stored WiFi keeps failing (router or password changed): reopen the portal so it can be fixed
+  // without a reflash. The counter restarts, so an unattended portal timeout retries the stored WiFi.
+  bool reopenPortal = wifiFailCycles >= WIFI_FAIL_CYCLES_FOR_PORTAL;
+  if (reopenPortal) {
+    USE_SERIAL.println("WiFi failed on repeated wakes; reopening the config portal");
+    wifiFailCycles = 0;
+  }
+  if (!reopenPortal && storedSSID.length() > 0 && EEPROM.read(CONFIG_FLAG_ADDR) == 1) {
+    configComplete = true;
     WiFi.onEvent(WiFiEvent);
     WiFi.mode(WIFI_STA);
     WiFiMulti.addAP(storedSSID.c_str(), storedPassword.c_str());
@@ -229,7 +241,7 @@ void setup() {
 
   epd.ClearFrame();
   //epd.Clear(0xFF);      // Clear to white background (handles dual-buffer prep)
-  epd.QRset(6);    // Draw QR code (single step)
+  epd.QRset(4);    // Draw QR code (single step)
   epd.TurnOnDisplay(); // Refresh display
   startConfigPortal();
 
@@ -259,12 +271,11 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
          USE_SERIAL.println("disconned");
       break;
        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+         // configComplete is set only by setup() (stored WiFi) or a verified save, never by STA events.
          USE_SERIAL.println("got_ip");
-         configComplete = true;
       break;
       case ARDUINO_EVENT_WIFI_STA_START:
          USE_SERIAL.println("sta start");
-         configComplete = true;
       break;
 
     default:
@@ -317,7 +328,7 @@ SlideShowStatus GetFile() { return fetchSlide(true); }
 
 void GoToSleep(long seconds)
 {
-
+                if (configComplete && !wifiConnectedThisWake) wifiFailCycles++;
                 WiFi.disconnect(true);
                 WiFi.mode(WIFI_OFF);
                 epd.Sleep();
@@ -353,6 +364,8 @@ void loop() {
     GoToSleep(TIMEOUT_SLEEP);
   }
   if(WiFiMulti.run() == WL_CONNECTED) {
+      wifiConnectedThisWake = true;
+      wifiFailCycles = 0;
       setClock();
       delay(200);
       USE_SERIAL.print("Device Id = ");
@@ -529,6 +542,16 @@ bool validDeviceId(const String& value) {
   for(unsigned i=0;i<value.length();++i) if(!isxdigit(value[i])) return false;
   return true;
 }
+String htmlEscape(const String& value) {
+  String out;
+  out.reserve(value.length());
+  for(unsigned i=0;i<value.length();++i) {
+    char c=value[i];
+    if(c=='&') out+="&amp;"; else if(c=='<') out+="&lt;"; else if(c=='>') out+="&gt;";
+    else if(c=='"') out+="&quot;"; else if(c=='\'') out+="&#39;"; else out+=c;
+  }
+  return out;
+}
 void migrateLegacySettings() {
   if(EEPROM.read(500)==0xE2 && EEPROM.read(501)==2) return;
   bool valid=EEPROM.read(200)==1;
@@ -619,7 +642,7 @@ void handleRoot() {
   html += "<h1>WiFi Setup</h1>";
 
   if (storedSSID.length() > 0 && EEPROM.read(CONFIG_FLAG_ADDR) == 1) {
-    html += "<div class=\"status success\">Currently configured WiFi: <strong>" + storedSSID + "</strong></div>";
+    html += "<div class=\"status success\">Currently configured WiFi: <strong>" + htmlEscape(storedSSID) + "</strong></div>";
   }
 
   html += "<form action=\"/save\" method=\"POST\">";
@@ -627,17 +650,13 @@ void handleRoot() {
   html +="<input type=\"text\" id=\"wifi-ssid\" name=\"username\" autocomplete=\"username\" placeholder=\"MyHomeWiFi\">";
   html +="<label for=\"wifi-password\">Wi-Fi Password</label>";
   html +="<input type=\"password\" id=\"wifi-password\" name=\"wifi-password\" autocomplete=\"current-password\" placeholder=\"*******\">";
- // html += "<label for=\"password\">WiFi Password:</label>";
- // html += "<input type=\"password\" id=\"password\" name=\"password\" value=\"" + storedPassword + "\">";
- // html += "<label for=\"ssid\">SSID:</label>";
- // html += "<input type=\"text\" id=\"ssid1\" name=\"ssid\" value=\"" + storedSSID + "\">";
   html += "<label for=\"device-id\">Device Id:</label>";
-  html += "<input type=\"text\" id=\"device-id\" name=\"device-id\" autocomplete=\"off\" value=\"" + storedDeviceId + "\">";
+  html += "<input type=\"text\" id=\"device-id\" name=\"device-id\" autocomplete=\"off\" value=\"" + htmlEscape(storedDeviceId) + "\">";
   html += "<div class=\"buttons\">";
   html += "<input type=\"submit\" value=\"Save & Connect\">";
   html += "<button type=\"button\" class=\"red\" onclick=\"window.location.href='/reset'\">Reset</button>";
   html += "</div></form>";
-  html += "<p><small>After saving, this device will attempt to connect to your WiFi network.</small></p>";
+  html += "<p><small>Saving tests the connection first (up to 20 seconds); nothing is stored unless it connects.</small></p>";
   html += FPSTR(HTML_FOOTER);
 
   server.send(200, "text/html", html);
@@ -658,48 +677,47 @@ void handleSave() {
 
     if (ssid.length() > 0 && ssid.length() <= EEPROM_STRING_SIZE - 1 &&
         password.length() <= EEPROM_PASS_SIZE - 1) {
-      saveCredentials(ssid, password,deviceid);
-
-      String html;
-      char buffer[2048];
-
-      // Build HTML header with style
-      sprintf(buffer, HTML_HEADER, HTML_STYLE);
-      html = String(buffer);
-
-      html += "<meta http-equiv=\"refresh\" content=\"10;url=/\">";
-      html += "<h1>WiFi Setup</h1>";
-      html += "<div class=\"status success\">WiFi credentials saved! Attempting to connect...</div>";
-      html += "<p>If connection is successful, this page will no longer be available.</p>";
-      html += "<p>If connection fails, the configuration portal will remain active.</p>";
-      html += "<p>This page will refresh in 10 seconds...</p>";
-      html += FPSTR(HTML_FOOTER);
-
-      server.send(200, "text/html", html);
-
-      // Attempt to connect with new credentials
-      delay(500);
-      WiFi.mode(WIFI_STA);
+      // Test before saving: stored details that cannot connect would skip the portal on every boot.
+      // AP_STA keeps the soft AP (and this request) alive while the station tries the router.
+      WiFi.mode(WIFI_AP_STA);
       WiFi.begin(ssid.c_str(), password.c_str());
-
-      long startAttemptTime = millis();
+      unsigned long startAttemptTime = millis();
       while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < WIFI_TIMEOUT) {
         delay(500);
         USE_SERIAL.print(".");
       }
       USE_SERIAL.println();
+      bool connected = WiFi.status() == WL_CONNECTED;
 
-      if (WiFi.status() == WL_CONNECTED) {
+      String html;
+      char buffer[2048];
+      sprintf(buffer, HTML_HEADER, HTML_STYLE);
+      html = String(buffer);
+      html += "<h1>WiFi Setup</h1>";
+      if (connected) {
+        saveCredentials(ssid, password, deviceid);
+        html += "<div class=\"status success\">Connected to <strong>" + htmlEscape(ssid) + "</strong>. Settings saved; the device is restarting.</div>";
+      } else {
+        html += "<div class=\"status error\">Could not connect to <strong>" + htmlEscape(ssid) + "</strong>. Nothing was saved.</div>";
+        html += "<p>Check the WiFi name and password and try again.</p>";
+        html += "<p><a href=\"/\">Back to setup</a></p>";
+      }
+      html += FPSTR(HTML_FOOTER);
+      server.send(200, "text/html", html);
+
+      if (connected) {
         USE_SERIAL.println("Connected to WiFi!");
         USE_SERIAL.print("IP address: ");
         USE_SERIAL.println(WiFi.localIP());
         configComplete = true;
-         USE_SERIAL.print("Reboot: ");
-         GoToSleep(2);
-
+        wifiFailCycles = 0;
+        wifiConnectedThisWake = true;
+        delay(1000); // let the response reach the phone
+        USE_SERIAL.print("Reboot: ");
+        GoToSleep(2);
       } else {
         USE_SERIAL.println("Failed to connect with new credentials");
-        // Restart AP mode
+        WiFi.disconnect();
         WiFi.mode(WIFI_AP);
         WiFi.softAP(AP_SSID, AP_PASSWORD);
       }

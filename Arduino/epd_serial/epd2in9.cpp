@@ -67,6 +67,35 @@
 extern const unsigned char lut_full_update[];
 extern const unsigned char lut_partial_update[];
 
+// SSD1608 (2.9inch V1) RAM window and address counter. The sketch streams a frame with
+// SendCommand(0x24) followed by raw data, so the window and cursor are restored before
+// every WRITE_RAM (see SendCommand) exactly as the Waveshare EPD_2IN9_Display() does.
+static void writeCommandRaw(unsigned char command) {
+    EpdIf::DigitalWrite(DC_PIN, LOW);
+    EpdIf::SpiTransfer(command);
+}
+static void writeDataRaw(unsigned char data) {
+    EpdIf::DigitalWrite(DC_PIN, HIGH);
+    EpdIf::SpiTransfer(data);
+}
+static void setMemoryArea(int x_start, int y_start, int x_end, int y_end) {
+    writeCommandRaw(SET_RAM_X_ADDRESS_START_END_POSITION);
+    writeDataRaw((x_start >> 3) & 0xFF);
+    writeDataRaw((x_end >> 3) & 0xFF);
+    writeCommandRaw(SET_RAM_Y_ADDRESS_START_END_POSITION);
+    writeDataRaw(y_start & 0xFF);
+    writeDataRaw((y_start >> 8) & 0xFF);
+    writeDataRaw(y_end & 0xFF);
+    writeDataRaw((y_end >> 8) & 0xFF);
+}
+static void setMemoryPointer(int x, int y) {
+    writeCommandRaw(SET_RAM_X_ADDRESS_COUNTER);
+    writeDataRaw((x >> 3) & 0xFF);
+    writeCommandRaw(SET_RAM_Y_ADDRESS_COUNTER);
+    writeDataRaw(y & 0xFF);
+    writeDataRaw((y >> 8) & 0xFF);
+}
+
 Epd::~Epd() {
 };
 
@@ -104,6 +133,8 @@ int Epd::Init(void) {
     SendCommand(DATA_ENTRY_MODE_SETTING);
     SendData(0x03);                     // X increment; Y increment
     SetLut();
+    setMemoryArea(0, 0, EPD_WIDTH - 1, EPD_HEIGHT - 1);
+    setMemoryPointer(0, 0);
     return 0;
 }
 
@@ -111,6 +142,11 @@ int Epd::Init(void) {
  *  @brief: basic function for sending commands
  */
 void Epd::SendCommand(unsigned char command) {
+    if (command == WRITE_RAM) {
+        // Every frame (download stream, retry, QRset, ClearFrame) starts at RAM 0,0
+        setMemoryArea(0, 0, EPD_WIDTH - 1, EPD_HEIGHT - 1);
+        setMemoryPointer(0, 0);
+    }
     DigitalWrite(dc_pin, LOW);
     SpiTransfer(command);
 }
@@ -171,23 +207,8 @@ void Epd::SetLut(void) {
 }
 
 void Epd::ClearFrame() {
-    SendCommand(SET_RAM_X_ADDRESS_START_END_POSITION);
-    SendData((0 >> 3) & 0xFF);
-    SendData(((width - 1) >> 3) & 0xFF);
-    SendCommand(SET_RAM_Y_ADDRESS_START_END_POSITION);
-    SendData(0 & 0xFF);
-    SendData((0 >> 8) & 0xFF);
-    SendData((height - 1) & 0xFF);
-    SendData(((height - 1) >> 8) & 0xFF);
-    
-    SendCommand(SET_RAM_X_ADDRESS_COUNTER);
-    SendData((0 >> 3) & 0xFF);
-    SendCommand(SET_RAM_Y_ADDRESS_COUNTER);
-    SendData(0 & 0xFF);
-    SendData((0 >> 8) & 0xFF);
     WaitUntilIdle();
-    
-    SendCommand(WRITE_RAM);
+    SendCommand(WRITE_RAM);             // window and cursor reset by SendCommand
     for (int i = 0; i < width / 8 * height; i++) {
         SendData(0xFF);
     }
