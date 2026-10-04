@@ -1,150 +1,95 @@
 #include <stdlib.h>
+#include <string.h>
 #include "epd_base.h"
 
 #ifndef QRSET_C
 #define QRSET_C
 
+// What QRset writes into each plane, in the format of the driver's cloud stream (screenCode).
+enum QrPlane { QR_DRAW, QR_ALL_LIGHT, QR_ALL_ZERO };
+
+static QrPlane qrPlaneFor(const char* code, int step) {
+    if (step == 0) return QR_DRAW;
+    if (strcmp(code, "V2A") == 0) return QR_DRAW;          // two identical planes
+    if (strcmp(code, "B") == 0 || strcmp(code, "BR") == 0) return QR_ALL_ZERO;   // red plane: no red
+    return QR_ALL_LIGHT;                                    // AS: right-hand controller stays white
+}
+
+// Stream value of a white pixel for a 1-bit plane of this Builder code (FuncAppEpaperBuilder ImageHandler):
+// A, V2A, BR plane 0 = black is 1; AR, AS, ARS, B plane 0 = white is 1.
+static unsigned char qrWhiteBit(const char* code) {
+    return (strcmp(code, "A") == 0 || strcmp(code, "V2A") == 0 || strcmp(code, "BR") == 0) ? 0 : 1;
+}
+
+// Draws the setup QR into every plane. The pixels are produced in the driver's cloud-stream format and
+// sent through SendStreamByte, so the QR gets exactly the polarity and expansion a downloaded image gets.
+// Rows use the RAM stride (blockSize / height) and the scale is reduced until the code fits the panel.
 void Epd::QRset( int scale) {
-    // QRset using steps/stepCommands (Clear-then-QRset approach)
+    if(!PixelFormatValid()) {
+        Serial.println("QRset: driver pixel format is not set; nothing drawn");
+        return;
+    }
+    unsigned long rowBytes = blockSize / height;                         // e.g. 16 for the 122-px 2.13" V3
+    unsigned long planeWidth = rowBytes * pixels_per_byte;               // e.g. 400 per 5.79" controller
+    unsigned long visibleWidth = width < planeWidth ? width : planeWidth;
+    unsigned long fit = (visibleWidth < height ? visibleWidth : height) / QRDIM;
+    if(fit < 1) fit = 1;
+    if(scale < 1 || (unsigned long)scale > fit) scale = (int)fit;
+    unsigned char light, dark;
+    if(bits_per_pixel == 1) { light = qrWhiteBit(screenCode); dark = light ^ 1; }
+    else { light = 0x1; dark = 0x0; }                                    // G and F palettes: 0 black, 1 white
+
     if(ShowDebug) {
-        Serial.print("QRset: Displaying QR code with color=0x");
-          Serial.println(qr_color);
-        Serial.print(", scale=");
-        Serial.println(scale);
-        Serial.print("Display size: ");
-        Serial.print(width);
-        Serial.print("x");
-        Serial.println(height);
-        Serial.print("QRset: ");
+        Serial.print("QRset: code ");
+        Serial.print(screenCode);
+        Serial.print(", ");
         Serial.print(bits_per_pixel);
-        Serial.print(" bits per pixel, ");
-        Serial.print(pixels_per_byte);
-        Serial.println(" pixels per byte");
-        Serial.print("Steps: ");
+        Serial.print(" bpp, plane ");
+        Serial.print(planeWidth);
+        Serial.print("x");
+        Serial.print(height);
+        Serial.print(", scale ");
+        Serial.print(scale);
+        Serial.print(", steps ");
         Serial.println(steps);
     }
-    
-    // Display-specific pre-setup
-    if(bits_per_pixel == 4) {
-        // 4.01" color needs resolution setup before data transmission
-        SendCommand(0x61);  // Set resolution
+
+    if(bits_per_pixel == 4 && !expand_1bpp_to_4bpp) {
+        // ACeP controllers: restate the resolution before the data transmission
+        SendCommand(0x61);
         SendData(width >> 8);
         SendData(width & 0xff);
         SendData(height >> 8);
         SendData(height & 0xff);
-        
-        if(ShowDebug) {
-            Serial.println("QRset: Set resolution for 4-bit color display");
+    }
+
+    for(int step = 0; step < steps; step++) {
+        QrPlane kind = qrPlaneFor(screenCode, step);
+        SendCommand(stepCommands[step]);
+        SetToDataMode();
+        for(unsigned long row = 0; row < height; row++) {
+            unsigned long qr_row = row / scale;
+            for(unsigned long col_byte = 0; col_byte < rowBytes; col_byte++) {
+                unsigned char packed = 0;
+                if(kind == QR_ALL_ZERO) {
+                    packed = 0;
+                } else {
+                    for(int pixel = 0; pixel < pixels_per_byte; pixel++) {
+                        unsigned long qr_col = (col_byte * pixels_per_byte + pixel) / scale;
+                        bool isDark = kind == QR_DRAW && qr_row < QRDIM && qr_col < QRDIM
+                                      && get_bit(wifi_qrcode_32x32_data, qr_row * QRDIM + qr_col);
+                        packed = (unsigned char)((packed << bits_per_pixel) | (isDark ? dark : light));
+                    }
+                }
+                SendStreamByte(packed, step);
+            }
         }
     }
-    
-    // Use configured steps and stepCommands (Clear() already handled buffer prep)
-   // for(int step = 0; step < steps; step++) {
-        SendCommand(stepCommands[steps-1]);
-        SetToDataMode();
-        
-        if(ShowDebug) {
-            Serial.print("QRset: Step ");
-            Serial.print(steps-1);
-            Serial.print(" using command 0x");
-            Serial.println(stepCommands[steps-1], HEX);
-        }
-        
-        // Generate QR data based on pixel format
-        if(bits_per_pixel == 4) {
-            // 4-bit color (2 pixels per byte)
-            for(int display_row = 0; display_row < height; display_row++) {
-                int qr_row = display_row / scale;
-                int qr_col = 0;
-                int x_scale_counter = 0;
-                
-                for(int display_col_pair = 0; display_col_pair < width/pixels_per_byte; display_col_pair++) {
-                    UBYTE pixel_pair = 0;
-                    
-                    // Process pixels for this byte
-                    for(int pixel = 0; pixel < pixels_per_byte; pixel++) {
-                        UBYTE pixel_color;
-                        
-                        // Check if we're outside the QR code area
-                        if(qr_row >= QRDIM || qr_col >= QRDIM) {
-                            pixel_color = 0x1;  // White background
-                        } else {
-                            // Get bit from QR code data
-                            int bit_position = qr_row * QRDIM + qr_col;
-                            if(bit_position >= QRDIM * QRDIM) {
-                                pixel_color = 0x1;  // White if out of bounds
-                            } else {
-                                uint8_t bit_value = get_bit(wifi_qrcode_32x32_data, bit_position);
-                                pixel_color = bit_value? qr_color : 0x1;  // QR color or white
-                            }
-                        }
-                        
-                        // Pack pixel into byte (first pixel in upper nibble, second in lower)
-                        if(pixel == 0) {
-                            pixel_pair = (pixel_color << 4);
-                        } else {
-                            pixel_pair |= pixel_color;
-                        }
-                        
-                        // Advance to next QR column when we've processed enough pixels
-                        x_scale_counter++;
-                        if(x_scale_counter >= scale) {
-                            x_scale_counter = 0;
-                            qr_col++;
-                        }
-                    }
-                    
-                    SendData(pixel_pair);
-                }
-            }
-            
-        } else if(bits_per_pixel == 1) {
-            // 1-bit monochrome (8 pixels per byte)
-            for(int display_row = 0; display_row < height; display_row++) {
-                int qr_row = display_row / scale;
-                
-                for(int byte_col = 0; byte_col < width/8; byte_col++) {
-                    UBYTE packed_byte = 0;
-                    
-                    // Pack 8 pixels into this byte (MSB first)
-                    for(int bit = 0; bit < 8; bit++) {
-                        int display_col = byte_col * 8 + bit;
-                        int qr_col = display_col / scale;
-                        
-                        // Check if we're outside the QR code area  
-                        if(qr_row >= QRDIM || qr_col >= QRDIM) {
-                            // White background - set bit to 1
-                            packed_byte |= (1 << (7-bit));
-                        } else {
-                            // Get bit from QR code data
-                            int bit_position = qr_row * QRDIM + qr_col;
-                            if(bit_position >= QRDIM * QRDIM) {
-                                // White if out of bounds - set bit to 1
-                                packed_byte |= (1 << (7-bit));
-                            } else {
-                                uint8_t qr_bit = get_bit(wifi_qrcode_32x32_data, bit_position);
-                                if(!qr_bit) {
-                                    // White pixel - set bit to 1 (black pixels leave bit as 0)
-                                    packed_byte |= (1 << (7-bit));
-                                }
-                                // Black pixels: bit remains 0 (default)
-                            }
-                        }
-                    }
-                    
-                    SendData(packed_byte);
-                }
-            }
-        }
-    //}
-    
+
     if(ShowDebug) {
-        Serial.println("QRset: Pixel data transmission complete");
-        Serial.print("QRset: Scaled QR code from 32x32 to ");
-        Serial.print(32 * scale);
-        Serial.print("x");
-        Serial.print(32 * scale);
-        Serial.println(" pixels");
+        Serial.print("QRset: drew a ");
+        Serial.print(QRDIM * scale);
+        Serial.println(" px QR code");
     }
 }
 

@@ -80,6 +80,8 @@
 #define EPD_HEIGHT      264
 #define EPD_STEPS      1
 #define EPD_BLOCK_SIZE  5808
+#define EPD_BITS_PER_PIXEL 1
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
 
 extern const unsigned char lut_vcom_dc[];
 extern const unsigned char lut_ww[];
@@ -101,8 +103,14 @@ Epd::Epd() {
     height = EPD_HEIGHT;
     steps = EPD_STEPS;
     blockSize = EPD_BLOCK_SIZE;
-    stepCommands[0] = 0x10;
-    stepCommands[0] = 0x13;
+    stepCommands[0] = 0x13;             // the frame goes to the "new data" RAM only
+    bits_per_pixel = EPD_BITS_PER_PIXEL;
+    pixels_per_byte = 8;
+    // Builder code AR: 1 bit per pixel, white = 1, rotated for this portrait panel. The 0x13 RAM uses
+    // 1 = white (ClearFrame writes 0xFF; Waveshare EPD_2IN7_Display sends the image unchanged).
+    // Same polarity: sent unchanged.
+    screenCode = "AR";
+    stepInvert[0] = false;
 };
 
 int Epd::Init(void) {
@@ -198,9 +206,7 @@ void Epd::SetToDataMode() {
  */
 void Epd::WaitUntilIdle(void) {
     DelayMs(200);
-    while(DigitalRead(busy_pin) == 0) {      //0: busy, 1: idle
-        DelayMs(100);
-    }      
+    WaitWhileBusy(LOW, 100);            //0: busy, 1: idle
 }
 
 /**
@@ -255,25 +261,8 @@ void Epd::SetLut(void) {
         SendData(lut_bb[count]);
     } 
 }
-void Epd::Clear() {
-     SendCommand(DATA_START_TRANSMISSION_1);           
-    DelayMs(2);
-    for(int i = 0; i < width * height / 8; i++) {
-        SendData(0xFF);  
-    }  
-    DelayMs(2);
-    SendCommand(DATA_START_TRANSMISSION_2);           
-    DelayMs(2);
-    for(int i = 0; i < width * height / 8; i++) {
-        SendData(0xFF);  
-    }  
-    DelayMs(2);
-     SendCommand(0x12); 
-        DelayMs(200);
-        WaitUntilIdle();
-}
-
 void Epd::Clear(unsigned char color) {
+    ClearFrame();
     TurnOnDisplay();
 }
 

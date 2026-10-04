@@ -63,6 +63,8 @@
 #define EPD_HEIGHT      296
 #define EPD_STEPS      1
 #define EPD_BLOCK_SIZE  4736  // 128 * 296 / 8
+#define EPD_BITS_PER_PIXEL 1
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
 
 extern const unsigned char lut_full_update[];
 extern const unsigned char lut_partial_update[];
@@ -109,6 +111,12 @@ Epd::Epd() {
     steps = EPD_STEPS;
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0] = 0x24;
+    bits_per_pixel = EPD_BITS_PER_PIXEL;
+    pixels_per_byte = 8;
+    // Builder code AR: 1 bit per pixel, white = 1, rotated for this portrait panel. SSD1608 RAM: 1 = white
+    // (ClearFrame writes 0xFF). Same polarity: sent unchanged.
+    screenCode = "AR";
+    stepInvert[0] = false;
 };
 
 int Epd::Init(void) {
@@ -130,6 +138,8 @@ int Epd::Init(void) {
     SendData(0x1A);                     // 4 dummy lines per gate
     SendCommand(SET_GATE_TIME);
     SendData(0x08);                     // 2us per line
+    SendCommand(BORDER_WAVEFORM_CONTROL);
+    SendData(0x03);
     SendCommand(DATA_ENTRY_MODE_SETTING);
     SendData(0x03);                     // X increment; Y increment
     SetLut();
@@ -171,9 +181,7 @@ void Epd::SetToDataMode() {
  *  @brief: Wait until the busy_pin goes LOW
  */
 void Epd::WaitUntilIdle(void) {
-    while(DigitalRead(busy_pin) == HIGH) {      //LOW: idle, HIGH: busy
-        DelayMs(100);
-    }      
+    WaitWhileBusy(HIGH, 100);           //LOW: idle, HIGH: busy
 }
 
 /**
@@ -182,10 +190,12 @@ void Epd::WaitUntilIdle(void) {
  *          see Epd::Sleep();
  */
 void Epd::Reset(void) {
-    DigitalWrite(reset_pin, LOW);
-    DelayMs(200);
     DigitalWrite(reset_pin, HIGH);
-    DelayMs(200);    
+    DelayMs(200);
+    DigitalWrite(reset_pin, LOW);
+    DelayMs(2);
+    DigitalWrite(reset_pin, HIGH);
+    DelayMs(200);
 }
 
 void Epd::TurnOnDisplay(void) {
@@ -210,7 +220,7 @@ void Epd::ClearFrame() {
     WaitUntilIdle();
     SendCommand(WRITE_RAM);             // window and cursor reset by SendCommand
     for (int i = 0; i < width / 8 * height; i++) {
-        SendData(0xFF);
+        SendData(0xFF);                 // 1 = white on this panel
     }
 }
 

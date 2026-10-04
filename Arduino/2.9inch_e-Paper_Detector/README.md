@@ -83,5 +83,8 @@ panel.
   probe helpers. Bit-banging means no dependency on which SPI peripheral a given XIAO
   (S3/C3/C6) exposes on D8/D10.
 - `EPD_2in9*.{h,cpp}`: copies of the Arduino UNO R4 drivers with their `ReadBusy` bodies
-  replaced by `DEV_WaitBusy`. `EPD_2in9_DES.*` is new, ported from the Raspberry Pi C driver.
+  replaced by `DEV_WaitBusy`. `EPD_2in9_DES.*` is new, ported from the Raspberry Pi C driver,
+  plus an explicit `0x61` resolution command (128×296) after `PSR 0x1F`, as `EPD_2in9d.cpp` does: without
+  it a UC8151-class controller defaults to 96×230 and the DES attempt could look garbled on a real DES panel
+  (not yet confirmed on hardware).
 - `GUI_Paint.*`, `fonts.h`, `font12/16/20.cpp`: from the Arduino UNO R4 tree.

@@ -63,7 +63,36 @@
 #define EPD_WIDTH       792
 #define EPD_HEIGHT      272
 #define EPD_STEPS      2
-#define EPD_BLOCK_SIZE  13600 // 6800 //  6732  // 792 * 272 / 8 / 4 (split into 4 parts)
+#define EPD_BLOCK_SIZE  13600 // one 400 x 272 half per controller (the Builder's AS halves)
+#define EPD_BITS_PER_PIXEL 1
+EPD_CHECK_PLANE(400, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
+
+// Master/slave RAM windows and address counters as Init() sets them (data entry 0x01: X increment,
+// Y decrement; the slave's X runs 0x31..0x00). Restored before every RAM write (see SendCommand) so each
+// half, QRset and a same-wake retry after a partial download start at the first byte.
+static void writeCommandRaw(unsigned char command) {
+    EpdIf::DigitalWrite(DC_PIN, LOW);
+    EpdIf::SpiTransfer(command);
+}
+static void writeDataRaw(unsigned char data) {
+    EpdIf::DigitalWrite(DC_PIN, HIGH);
+    EpdIf::SpiTransfer(data);
+}
+static void setWindowAndCursor(bool slave) {
+    writeCommandRaw(slave ? SET_RAM_X_ADDRESS_START_END_POSITION_S : SET_RAM_X_ADDRESS_START_END_POSITION);
+    writeDataRaw(slave ? 0x31 : 0x00);
+    writeDataRaw(slave ? 0x00 : 0x31);  //400/8-1
+    writeCommandRaw(slave ? SET_RAM_Y_ADDRESS_START_END_POSITION_S : SET_RAM_Y_ADDRESS_START_END_POSITION);
+    writeDataRaw(0x0f);
+    writeDataRaw(0x01);                 //272-1
+    writeDataRaw(0x00);
+    writeDataRaw(0x00);
+    writeCommandRaw(slave ? SET_RAM_X_ADDRESS_COUNTER_S : SET_RAM_X_ADDRESS_COUNTER);
+    writeDataRaw(slave ? 0x31 : 0x00);
+    writeCommandRaw(slave ? SET_RAM_Y_ADDRESS_COUNTER_S : SET_RAM_Y_ADDRESS_COUNTER);
+    writeDataRaw(0x0f);
+    writeDataRaw(0x01);
+}
 
 Epd::~Epd() {
 };
@@ -79,6 +108,13 @@ Epd::Epd() {
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0] = 0x24;
     stepCommands[1] = 0xA4;
+    bits_per_pixel = EPD_BITS_PER_PIXEL;
+    pixels_per_byte = 8;
+    // Builder code AS: two 400-px halves (left to the master, right to the slave), 1 bit per pixel,
+    // white = 1. Both controllers' black/white RAM use 1 = white (ClearFrame writes 0xFF). Sent unchanged.
+    screenCode = "AS";
+    stepInvert[0] = false;
+    stepInvert[1] = false;
    //  stepCommands[2] = 0xA4;
   //  stepCommands[3] = 0XA6;
 };
@@ -143,6 +179,8 @@ int Epd::Init(void) {
  *  @brief: basic function for sending commands
  */
 void Epd::SendCommand(unsigned char command) {
+    if (command == WRITE_RAM_BW_M || command == WRITE_RAM_RED_M) setWindowAndCursor(false);
+    else if (command == WRITE_RAM_BW_S || command == WRITE_RAM_RED_S) setWindowAndCursor(true);
     DigitalWrite(dc_pin, LOW);
     SpiTransfer(command);
 }
@@ -167,10 +205,7 @@ void Epd::SetToDataMode() {
  *  @brief: Wait until the busy_pin goes HIGH
  */
 void Epd::WaitUntilIdle(void) {
-   while(DigitalRead(busy_pin) == 1) {      //0: busy, 1: idle
-        DelayMs(100);
-         
-    }           
+    WaitWhileBusy(HIGH, 100);           //LOW: idle, HIGH: busy
 }
 
 /**

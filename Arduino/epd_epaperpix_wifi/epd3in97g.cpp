@@ -42,9 +42,11 @@
 
 #define EPD_STEPS       1
 #define EPD_BLOCK_SIZE  96000
+
 // Pixel format for this display
-#define EPD_BITS_PER_PIXEL 2    // Color: 4 bits per pixel
+#define EPD_BITS_PER_PIXEL 2    // 4 colours: 2 bits per pixel
 #define EPD_PIXELS_PER_BYTE 4   // Each byte contains 4 pixels
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
 
 
 Epd::~Epd() {
@@ -57,11 +59,15 @@ Epd::Epd() {
     busy_pin = BUSY_PIN;
     width = EPD_WIDTH;
     height = EPD_HEIGHT;
-    bits_per_pixel = EPD_BITS_PER_PIXEL;
-    pixels_per_byte = EPD_PIXELS_PER_BYTE;
     steps = EPD_STEPS;
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0] = 0x10;
+    bits_per_pixel = EPD_BITS_PER_PIXEL;
+    pixels_per_byte = EPD_PIXELS_PER_BYTE;
+    // Builder code G: 2 bits per pixel, first pixel in bits 7-6, 00 black, 01 white, 10 yellow, 11 red -
+    // the controller's own colour codes (Clear(color) packs the same 2-bit codes). Sent unchanged.
+    screenCode = "G";
+    stepInvert[0] = false;
 };
 
 int Epd::Init(void) {
@@ -156,9 +162,7 @@ void Epd::SetToDataMode() {
  *  @brief: Wait until the busy_pin goes HIGH
  */
 void Epd::WaitUntilIdle(void) {
-    while(DigitalRead(busy_pin) == LOW) {      //LOW: busy, HIGH: idle
-        DelayMs(5);
-    }
+    WaitWhileBusy(LOW, 5);              //LOW: busy, HIGH: idle
 }
 
 /**

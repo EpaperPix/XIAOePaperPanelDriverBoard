@@ -46,6 +46,7 @@
 // Pixel format for this display
 #define EPD_BITS_PER_PIXEL 1    // Monochrome: 1 byte per pixel  
 #define EPD_PIXELS_PER_BYTE 8   // Each byte is one pixel
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
 
 unsigned char Voltage_Frame_7IN5_V2[]={
 	0x6, 0x3F, 0x3F, 0x11, 0x24, 0x7, 0x17,
@@ -116,6 +117,11 @@ Epd::Epd() {
     steps=EPD_STEPS;
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0]=0x13;
+    // Builder code A: 1 bit per pixel, black = 1. This driver runs the UC8179 in KW mode with CDI 0x10
+    // (DDX=00), where the 0x13 "new data" RAM also uses 1 = black (Waveshare EPD_7IN5_V2 sends ~image
+    // there and clears it with 0x00). Same polarity: sent unchanged.
+    screenCode = "A";
+    stepInvert[0] = false;
     ShowDebug = false;
 };
 
@@ -317,12 +323,8 @@ void Epd::SendDataFast(unsigned char data) {
 //     DelayMs(200);
 // }
 void Epd::WaitUntilIdle(void) {
-    unsigned char busy;
     Serial.print("e-Paper Busy\r\n ");
-    do{
-        SendCommand(0x71);
-        busy = DigitalRead(busy_pin);
-    }while(busy == 0);
+    WaitWhileBusy(LOW, 1, 0x71);        // poll "get status"; BUSY low: busy
     Serial.print("e-Paper Busy Release\r\n ");
     DelayMs(20);
 }
@@ -383,21 +385,16 @@ void Epd::Clear( unsigned char color) {
     WaitUntilIdle();
 }
 
+
+
+/* END OF FILE */
+
 void Epd::ClearFrame() {
-    
     SendCommand(0x10);
     SetToDataMode();
     for(unsigned long i=0; i<height*width / 8; i++) {
-        SendData(0xff);
+        SendData(0xFF);
     }
-    // SendCommand(0x13);
-    // SetToDataMode();
-    // for(unsigned long i=0; i<height*width / 8; i++)	{
-    //     SendData(0xff);
-    // }
-   
 }
-
-/* END OF FILE */
 
 #endif

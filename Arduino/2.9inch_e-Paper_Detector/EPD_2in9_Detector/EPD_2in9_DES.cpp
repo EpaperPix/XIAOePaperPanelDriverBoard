@@ -82,6 +82,13 @@ void EPD_2IN9_DES_Init(void)
     EPD_2IN9_DES_SendCommand(0x00);    // Panel setting: LUT from OTP, B/W
     EPD_2IN9_DES_SendData(0x1f);
 
+    // PSR 0x1F leaves RES[1:0] = 00 (96x230) on UC8151-class controllers; set the 128x296 window
+    // explicitly, as EPD_2in9d.cpp does after the same PSR value, so the 4736-byte frame lands unscaled.
+    EPD_2IN9_DES_SendCommand(0x61);    // Resolution setting (TRES)
+    EPD_2IN9_DES_SendData(EPD_2IN9_DES_WIDTH);
+    EPD_2IN9_DES_SendData((EPD_2IN9_DES_HEIGHT >> 8) & 0xff);
+    EPD_2IN9_DES_SendData(EPD_2IN9_DES_HEIGHT & 0xff);
+
     EPD_2IN9_DES_SendCommand(0x50);    // VCOM and data interval
     EPD_2IN9_DES_SendData(0x97);
 }

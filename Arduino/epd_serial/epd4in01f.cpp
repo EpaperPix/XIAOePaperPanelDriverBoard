@@ -42,6 +42,7 @@
 // Pixel format for this display
 #define EPD_BITS_PER_PIXEL 4    // Color: 4 bits per pixel
 #define EPD_PIXELS_PER_BYTE 2   // Each byte contains 2 pixels
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
 
 Epd::~Epd() {
 };
@@ -58,6 +59,11 @@ Epd::Epd() {
     steps = EPD_STEPS;
     stepCommands[0] = 0x10;
     blockSize = EPD_BLOCK_SIZE;
+    // Builder code F: one 4-bit palette index per pixel, first pixel in the high nibble (0 black, 1 white,
+    // 2 green, 3 blue, 4 red, 5 yellow, 6 orange) - the indices this ACeP controller uses. Sent unchanged.
+    screenCode = "F";
+    stepInvert[0] = false;
+    busy_timeout_ms = 60000UL;          // a 7-colour refresh takes about 30 s
     ShowDebug = false;
 };
 
@@ -116,7 +122,7 @@ void Epd::SetToDataMode() {
 }
 
 void Epd::WaitUntilIdle(void) {
-    while(!(DigitalRead(busy_pin)));
+    WaitWhileBusy(LOW, 1);              // BUSY low: busy
 }
 
 void Epd::Reset(void) {
@@ -134,7 +140,7 @@ void Epd::TurnOnDisplay(void) {
     SendCommand(0x12);
     WaitUntilIdle();
     SendCommand(0x02);
-    while(DigitalRead(busy_pin));
+    WaitWhileBusy(HIGH, 1);             // power off: wait for BUSY to drop
     DelayMs(200);
 }
 

@@ -80,6 +80,8 @@
 #define EPD_HEIGHT      264
 #define EPD_STEPS      2
 #define EPD_BLOCK_SIZE  5808
+#define EPD_BITS_PER_PIXEL 1
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
 
 extern const unsigned char lut_vcom_dc[];
 extern const unsigned char lut_ww[];
@@ -102,6 +104,14 @@ Epd::Epd() {
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0] = 0x10;
     stepCommands[1] = 0x13;
+    bits_per_pixel = EPD_BITS_PER_PIXEL;
+    pixels_per_byte = 8;
+    // Builder code BR: plane 0 black = 1, plane 1 red = 1, rotated for this portrait panel. This KWR
+    // controller uses 1 = black in 0x10 and 1 = red in 0x13 (ClearFrame writes 0x00 to both for white,
+    // as the Waveshare 2.7b driver does). Same polarity on both planes: sent unchanged.
+    screenCode = "BR";
+    stepInvert[0] = false;
+    stepInvert[1] = false;
 };
 
 int Epd::Init(void) {
@@ -201,9 +211,7 @@ void Epd::SetToDataMode() {
  *  @brief: Wait until the busy_pin goes HIGH
  */
 void Epd::WaitUntilIdle(void) {
-    while(DigitalRead(busy_pin) == 0) {      //0: busy, 1: idle
-        DelayMs(100);
-    }      
+    WaitWhileBusy(LOW, 100);            //0: busy, 1: idle
 }
 
 /**

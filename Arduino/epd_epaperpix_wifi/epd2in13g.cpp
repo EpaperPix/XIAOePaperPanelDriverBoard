@@ -45,6 +45,7 @@
 // Pixel format for this display
 #define EPD_BITS_PER_PIXEL 2    // 4 colors: 2 bits per pixel
 #define EPD_PIXELS_PER_BYTE 4   // Each byte contains 4 pixels
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
 
 Epd::~Epd() {
 };
@@ -61,6 +62,11 @@ Epd::Epd() {
     steps = EPD_STEPS;
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0] = 0x10;
+    // Builder code GR: 2 bits per pixel, first pixel in bits 7-6, 00 black, 01 white, 10 yellow, 11 red,
+    // rotated for this portrait panel (RAM 128 wide, 122 visible) - the controller's own colour codes.
+    // Sent unchanged.
+    screenCode = "GR";
+    stepInvert[0] = false;
 };
 
 int Epd::Init(void) {
@@ -161,9 +167,7 @@ void Epd::SetToDataMode() {
  *  @brief: Wait until the busy_pin goes HIGH
  */
 void Epd::WaitUntilIdle(void) {
-    while(DigitalRead(busy_pin) == LOW) {      //LOW: busy, HIGH: idle
-        DelayMs(5);
-    }
+    WaitWhileBusy(LOW, 5);              //LOW: busy, HIGH: idle
 }
 
 /**

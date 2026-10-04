@@ -97,6 +97,8 @@
 #define EPD_HEIGHT      200
 #define EPD_STEPS      2
 #define EPD_BLOCK_SIZE  5000
+#define EPD_BITS_PER_PIXEL 1
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
 
 extern const unsigned char lut_vcom0[];
 extern const unsigned char lut_w[];
@@ -121,6 +123,15 @@ Epd::Epd() {
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0] = 0x10;
     stepCommands[1] = 0x13;
+    bits_per_pixel = EPD_BITS_PER_PIXEL;
+    pixels_per_byte = 8;
+    // Builder code B: plane 0 white = 1, plane 1 red = 1. Not supported by the portal: this V1 controller's
+    // 0x10 RAM takes 2 bits per pixel (ClearFrame writes 2 x 5000 bytes), so a 5000-byte B plane fills only
+    // half of it (see the note at the top). Red RAM: 1 = no red (ClearFrame writes 0xFF), so plane 1 is
+    // complemented; plane 0 white = 1 as in the RAM.
+    screenCode = "B";
+    stepInvert[0] = false;
+    stepInvert[1] = true;
 };
 
 int Epd::Init(void) {
@@ -187,9 +198,7 @@ void Epd::SetToDataMode() {
  *  @brief: Wait until the busy_pin goes HIGH
  */
 void Epd::WaitUntilIdle(void) {
-    while(DigitalRead(busy_pin) == 0) {      //0: busy, 1: idle
-        DelayMs(100);
-    }      
+    WaitWhileBusy(LOW, 100);            //0: busy, 1: idle
 }
 
 /**

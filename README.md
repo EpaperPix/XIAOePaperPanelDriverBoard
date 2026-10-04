@@ -44,12 +44,14 @@ XIAOePaperPanelDriverBoard/
 ├── Arduino/
 │   ├── epd_epaperpix_wifi/        # WiFi-enabled client for epaperpix.app
 │   │   ├── epd_epaperpix_wifi.ino # Main WiFi sketch
-│   │   ├── epdif.h/cpp            # Hardware interface (PIN MAPPINGS HERE)
+│   │   ├── display_config.h       # Panel and carrier board selection
+│   │   ├── epdif.h/cpp            # Hardware interface (pin map)
 │   │   ├── epd_base.h             # Base display class
 │   │   └── epd*.cpp               # Individual display drivers
 │   └── epd_serial/                # Serial interface for direct control
 │       ├── epd_serial.ino         # Main serial sketch
-│       ├── epdif.h/cpp            # Hardware interface (PIN MAPPINGS HERE)
+│       ├── display_config.h       # Panel and carrier board selection
+│       ├── epdif.h/cpp            # Hardware interface (pin map)
 │       ├── epd_base.h             # Base display class
 │       └── epd*.cpp               # Individual display drivers
 ├── LICENSE                        # MIT License
@@ -58,21 +60,20 @@ XIAOePaperPanelDriverBoard/
 
 ## Getting Started
 
-### 1. Configure Pin Mappings
+### 1. Select Your Carrier Board
 
-Edit `epdif.h` in your chosen sketch folder to match your hardware connections:
+Both sketches read `display_config.h`. The two SeeedStudio boards differ only in the BUSY pin:
 
 ```cpp
-// Pin definition for Seeed Studio ePaper Driver XIAO
-#define RST_PIN         D0
-#define DC_PIN          D3
-#define CS_PIN          D1
-#define BUSY_PIN        D2
+#define EPD_XIAO_DRIVER      // ePaper Driver Board / XIAO 7.5" ePaper Panel: BUSY = D2 (default)
+// #define EPD_XIAO_BREAKOUT // ePaper Breakout Board: BUSY = D5
 ```
+
+RST = D0, DC = D3, CS = D1, SCK = D8 and MOSI = D10 on both. The sketch prints the selected board at boot.
 
 ### 2. Select Your Display
 
-In every `.cpp`  file, change the `#ifdef` to `#ifndef` for your display type:
+In `display_config.h`, set the default panel define (for example `#define EPD2IN9_C`), or pass `-DEPD2IN9_C` to the compiler. Exactly one panel may be selected.
 
 
 ### 3. Upload and Run
@@ -87,15 +88,17 @@ In every `.cpp`  file, change the `#ifdef` to `#ifndef` for your display type:
 ### WiFi Mode (epd_epaperpix_wifi)
 
 1. Power on the device
-2. Connect to WiFi AP: `epaperpix_WiFi_Setup`
+2. Connect to WiFi AP: `epaperpix_WiFi_Setup` (password `configme`)
 3. Open browser to `192.168.4.1`
-4. Enter your WiFi credentials and epaperpix.app device details
+4. Enter your WiFi credentials and epaperpix.app device code
 5. Device will automatically fetch and display content
+
+The portal reopens by itself after three wakes without WiFi or three wakes where the server rejects the device code. Blank fields keep the saved values; the saved device code is never shown (only its last four characters). Reset (tick the box, then press Reset) erases the WiFi settings and the device code.
 
 ### Serial Mode (epd_serial)
 
-1. Connect via serial at 115200 baud
-2. Send image data directly to the display
+1. Connect via serial at 115200 baud and wait for `Ready`
+2. Send one frame: `EPX1`, the payload length (uint32 little-endian), the payload (the cloud `.bin`), and its CRC-32 (`zlib.crc32`, uint32 little-endian). Headerless raw frames are still accepted. Do not send a `0x24` byte first.
 3. Useful for debugging or standalone applications
 
 ## Supported Displays
@@ -104,7 +107,8 @@ In every `.cpp`  file, change the `#ifdef` to `#ifndef` for your display type:
 |---------|------|---------|------|---------|
 | EPD1IN54 | 1.54" | B/W | A | `EPD1IN54_C` |
 | EPD1IN54B | 1.54" | B/W/Red | B | `EPD1IN54B_C` |
-| EPD2IN13_V2/V3 | 2.13" | B/W | A | `EPD2IN13_V2_C` |
+| EPD2IN13_V2/V3 | 2.13" | B/W | A | `EPD2IN13_V2_C` / `EPD2IN13_V3_C` |
+| EPD2IN13G | 2.13" | 4 Color | G | `EPD2IN13G_C` |
 | EPD2IN66G | 2.66" | 4 Color | G | `EPD2IN66G_C` |
 | EPD2IN7 | 2.7" | B/W | A | `EPD2IN7_C` |
 | EPD2IN7B | 2.7" | B/W/Red | B | `EPD2IN7B_C` |
@@ -114,7 +118,7 @@ In every `.cpp`  file, change the `#ifdef` to `#ifndef` for your display type:
 | EPD5IN79 | 5.79" | B/W | A | `EPD5IN79_C` |
 | EPD7IN3F | 7.3" | 7 Color | F | `EPD7IN3F_C` |
 | EPD7IN3G | 7.3" | 4 Color | G | `EPD7IN3G_C` |
-| EPD7IN5 | 7.5" | B/W | A | `EPD7IN5_C` |
+| EPD7IN5 (V1) | 7.5" | B/W | A | `EPD7IN5_C` |
 | EPD7IN5_V2 | 7.5" | B/W | A | `EPD7IN5_V2_C` |
 | EPD7IN5B_V2 | 7.5" | B/W/Red | B | `EPD7IN5B_C` |
 

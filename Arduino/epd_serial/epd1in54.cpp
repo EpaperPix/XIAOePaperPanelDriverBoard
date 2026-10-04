@@ -63,9 +63,37 @@
 #define EPD_HEIGHT      200
 #define EPD_STEPS      1
 #define EPD_BLOCK_SIZE  5000
+#define EPD_BITS_PER_PIXEL 1
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
 
 extern const unsigned char lut_full_update[];
 extern const unsigned char lut_partial_update[];
+
+// RAM window and address counter (X/Y increment, data entry 0x03). Restored before every WRITE_RAM
+// (see SendCommand) so each frame, QRset and a same-wake retry after a partial download start at 0,0.
+static void writeCommandRaw(unsigned char command) {
+    EpdIf::DigitalWrite(DC_PIN, LOW);
+    EpdIf::SpiTransfer(command);
+}
+static void writeDataRaw(unsigned char data) {
+    EpdIf::DigitalWrite(DC_PIN, HIGH);
+    EpdIf::SpiTransfer(data);
+}
+static void setWindowAndCursor() {
+    writeCommandRaw(SET_RAM_X_ADDRESS_START_END_POSITION);
+    writeDataRaw(0x00);
+    writeDataRaw(((EPD_WIDTH - 1) >> 3) & 0xFF);
+    writeCommandRaw(SET_RAM_Y_ADDRESS_START_END_POSITION);
+    writeDataRaw(0x00);
+    writeDataRaw(0x00);
+    writeDataRaw((EPD_HEIGHT - 1) & 0xFF);
+    writeDataRaw(((EPD_HEIGHT - 1) >> 8) & 0xFF);
+    writeCommandRaw(SET_RAM_X_ADDRESS_COUNTER);
+    writeDataRaw(0x00);
+    writeCommandRaw(SET_RAM_Y_ADDRESS_COUNTER);
+    writeDataRaw(0x00);
+    writeDataRaw(0x00);
+}
 
 Epd::~Epd() {
 };
@@ -80,6 +108,12 @@ Epd::Epd() {
     steps = EPD_STEPS;
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0] = 0x24;
+    bits_per_pixel = EPD_BITS_PER_PIXEL;
+    pixels_per_byte = 8;
+    // Builder code A: 1 bit per pixel, black = 1. This controller's RAM uses 1 = white (ClearFrame writes
+    // 0xFF): the plane is complemented on the way to the panel.
+    screenCode = "A";
+    stepInvert[0] = true;
 };
 
 int Epd::Init(void) {
@@ -121,6 +155,7 @@ int Epd::Init(void) {
  *  @brief: basic function for sending commands
  */
 void Epd::SendCommand(unsigned char command) {
+    if (command == WRITE_RAM) setWindowAndCursor();
     DigitalWrite(dc_pin, LOW);
     SpiTransfer(command);
 }
@@ -145,9 +180,7 @@ void Epd::SetToDataMode() {
  *  @brief: Wait until the busy_pin goes LOW
  */
 void Epd::WaitUntilIdle(void) {
-    while(DigitalRead(busy_pin) == HIGH) {      //LOW: idle, HIGH: busy
-        DelayMs(100);
-    }      
+    WaitWhileBusy(HIGH, 100);           //LOW: idle, HIGH: busy
 }
 
 /**

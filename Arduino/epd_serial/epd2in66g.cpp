@@ -71,7 +71,9 @@
 #define EPD_WIDTH       184
 #define EPD_HEIGHT      360
 #define EPD_STEPS      1
-#define EPD_BLOCK_SIZE  16560  // 152 * 296 / 4 (4 colors per byte)
+#define EPD_BLOCK_SIZE  16560  // 184 * 360 / 4 (4 pixels per byte)
+#define EPD_BITS_PER_PIXEL 2
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
 
 Epd::~Epd() {
 };
@@ -86,6 +88,13 @@ Epd::Epd() {
     steps = EPD_STEPS;
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0] = 0x10;
+    bits_per_pixel = EPD_BITS_PER_PIXEL;
+    pixels_per_byte = 4;
+    // Builder code GR: 2 bits per pixel, first pixel in bits 7-6, 00 black, 01 white, 10 yellow, 11 red,
+    // rotated for this portrait panel - the controller's own colour codes (ClearFrame writes 0x55 for
+    // white). Sent unchanged.
+    screenCode = "GR";
+    stepInvert[0] = false;
 };
 
 int Epd::Init(void) {
@@ -183,9 +192,7 @@ void Epd::SetToDataMode() {
  *  @brief: Wait until the busy_pin goes LOW
  */
 void Epd::WaitUntilIdle(void) {
-    while(DigitalRead(busy_pin) == LOW) {      //LOW: busy, HIGH: idle
-        DelayMs(5);
-    }     
+    WaitWhileBusy(LOW, 5);              //LOW: busy, HIGH: idle
 }
 
 /**

@@ -1,13 +1,13 @@
 /**
- * ESP32 E-Paper Display WiFi Client
- *  Important #ifndef the display you want to use other displays must be all ifndef
+ * ESP32 E-Paper Display WiFi Client for epaperpix.app
+ * The panel and the XIAO carrier board are selected in display_config.h.
  */
 
 /**
 ************Currently set to EPD2IN9_C (2.9inch V1, SSD1608) via display_config.h on the SeeedStudio ePaper Driver board; XIAO ESP32-S3/C3/C6********************
 */
 
-
+#include "display_config.h"
 
 // Type definitions
 #define UBYTE unsigned char
@@ -27,13 +27,12 @@
 #include "TrustedRoots.h"
 void GoToSleep(long seconds);
 bool validDeviceId(const String& value);
-
+long nextFailureSleep();
 
 
 #include <WiFiClientSecure.h>
 
 #define uS_TO_S_FACTOR 1000000ULL  /* Conversion factor for micro seconds to seconds */
-#define TIME_TO_SLEEP  180        /* Time ESP32 will go to sleep (in seconds) */
 #define USE_SERIAL Serial
 
 // EEPROM size and addresses
@@ -50,30 +49,32 @@ bool validDeviceId(const String& value);
 // Network and timing constants
 #define WIFI_TIMEOUT 20000        /* Portal credential test timeout in milliseconds */
 #define WIFI_FAIL_CYCLES_FOR_PORTAL 3 /* Consecutive wakes without WiFi before the portal reopens */
-#define RETRY_DELAY 500           /* Delay between retries in milliseconds */
+#define AUTH_FAIL_WAKES_FOR_PORTAL 3  /* Consecutive wakes answered HTTP 401 before the portal reopens */
 #define LOOP_DELAY 10000          /* Main loop delay in milliseconds */
-#define DOWNLOAD_BUFFER_SIZE 128  /* Buffer size for downloading data */
-#define LARGE_BUFFER_SIZE 1024    /* Large buffer size for data processing */
 #define DEFAULT_SLEEP_TIME 60     /* Default sleep time in seconds */
-#define RETRY_SLEEP_TIME 120      /* Sleep time after retry in seconds */
-#define LOOP_TIMEOUT 5            /* Maximum loop count before sleep */
-#define TIMEOUT_SLEEP 600         /* Sleep time when loop times out */
-#define MAX_RETRIES 5             /* Maximum number of download retries */
-#define DISPLAY_RETRY_COUNT 10    /* Maximum display retry attempts */
-#define DISPLAY_THRESHOLD 145     /* Display readiness threshold */
-#define DISPLAY_RETRY_DELAY 2000  /* Delay between display retries */
-#define DOWNLOAD_DELAY 100        /* Delay after download completion */
+#define LOOP_TIMEOUT 5            /* WiFi attempts (loop passes) per wake before giving up */
+#define TIMEOUT_SLEEP 600         /* Sleep time after an unattended portal times out */
+#define MIN_SECONDS_DELAY 30      /* Floor on the server's secondsDelay for normal responses */
+#define BACKOFF_FIRST_SLEEP 60    /* First sleep after a failed wake; doubles per consecutive failure */
+#define BACKOFF_MAX_SLEEP 3600    /* Longest failure back-off */
+#define DOWNLOAD_ATTEMPTS 3       /* Attempts per wake for transient download errors (the last uses the fallback host) */
 #define EEPROM_STRING_SIZE 33     /* Maximum size for EEPROM strings */
 #define EEPROM_PASS_SIZE 65       /* Maximum size for EEPROM password */
-#define JSON_DOC_SIZE 1024         /* JSON document size for parsing */
-#define TIMEOUT_COUNTER 20000     /* Timeout counter for operations */
+#ifndef EPD_CHECK_SCREEN_CODE
+#define EPD_CHECK_SCREEN_CODE 1   /* Refuse a .bin whose name says it was built for another screen code */
+#endif
+
+// ArduinoJson 7 sizes documents on the heap and deprecates StaticJsonDocument; 6.x needs the fixed size.
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+typedef JsonDocument ResponseJson;
+#else
+typedef StaticJsonDocument<1024> ResponseJson;
+#endif
 
 // API endpoints
 #define API_BASE_URL "https://api.epaperpix.app"
-// TODO: Move API keys to EEPROM or secure storage instead of hardcoding
 #define API_START_ENDPOINT "/epaper2/DSlideShowStart/"
 #define API_FILE_ENDPOINT "/epaper2/DSlideShow/"
-#define API_DEVICE_ENDPOINT "/epaper3/GetDeviceInfo/id/"
 #define BLOB_URL_PRIMARY "https://blob.epaperpix.app/epaperfiles/"
 #define BLOB_URL_SECONDARY "https://epaperstore.blob.core.windows.net/epaperfiles/"
 
@@ -122,10 +123,17 @@ String storedUserId = "";
 String storedDeviceId = "";
 String storedSubId = "";
 String storedScreenName = "";
+String portalToken = "";   // per-boot token the reset form must echo
 bool configComplete = false;
 bool apconnected =false;
-// Survives deep sleep, cleared by a power cycle: consecutive wakes that never reached WiFi.
-RTC_DATA_ATTR int wifiFailCycles = 0;
+// Survive deep sleep, cleared by a power cycle.
+RTC_DATA_ATTR int wifiFailCycles = 0;      // consecutive wakes that never reached WiFi
+RTC_DATA_ATTR uint8_t apiFailCycles = 0;   // consecutive failed wakes: drives the 60 s .. 1 h back-off
+RTC_DATA_ATTR uint8_t authFailCycles = 0;  // consecutive wakes answered HTTP 401 (unknown or revoked code)
+RTC_DATA_ATTR bool screenStale = false;    // the setup QR replaced the picture: redraw on the next good poll
+RTC_DATA_ATTR uint8_t portalReason = 0;    // why the portal reopened, shown on its page
+#define PORTAL_REASON_WIFI 1
+#define PORTAL_REASON_AUTH 2
 bool wifiConnectedThisWake = false;
 
 struct SlideShowStatus
@@ -133,11 +141,16 @@ struct SlideShowStatus
   String filename;
   bool gotosleep;
   long secondsdelay;
-  bool didcall;
-  bool retry;
+  bool retry;          // true: the call failed
+  int httpCode;        // HTTP status, or a negative HTTPClient transport error
+  long serverDelay;    // > 0: a 503 said how long to wait (15..3600 s)
 } ;
 
- StaticJsonDocument<JSON_DOC_SIZE> doc;
+// Download results
+#define DL_OK 1
+#define DL_TRANSIENT 0     // transport error, 5xx or interrupted body: may retry in this wake
+#define DL_TERMINAL -3     // size mismatch or HTTP 4xx: retrying in this wake cannot help
+#define DL_PANEL -4        // the panel kept BUSY asserted
 
 void setClock() {
   configTime(0, 0, "pool.ntp.org");
@@ -146,7 +159,7 @@ void setClock() {
   time_t nowSecs = time(nullptr);
   unsigned long ntpStarted=millis();
   while (nowSecs < 8 * 3600 * 2) {
-    if(millis()-ntpStarted>=15000UL) { GoToSleep(600); return; }
+    if(millis()-ntpStarted>=15000UL) { GoToSleep(nextFailureSleep()); return; }
     delay(500);
     USE_SERIAL.print(F("."));
     yield();
@@ -162,9 +175,7 @@ void setClock() {
 
 
 WiFiMulti WiFiMulti;
-uint8_t screenbuf1[LARGE_BUFFER_SIZE];
 Epd epd;
-int loopCount=0;
 int needDeviceIfo=0;
 
 
@@ -188,70 +199,68 @@ void print_wakeup_reason(){
 void setup() {
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
- //  clearCredentials();
-
+ //  wipeSettings();
+ 
 
    USE_SERIAL.begin(115200);
-
-   // Do this to clear eeprom
-  //  clearEEPROM();
-  //   for(;;)
-  //   {
-  //     USE_SERIAL.print("*");
-  //     delay(2000);
-
-  //   }
   needDeviceIfo = loadCredentials();
   USE_SERIAL.print("needDeviceIfo =");
   USE_SERIAL.println(needDeviceIfo);
-
+  USE_SERIAL.println(EPD_BOARD_NAME);
+  
   if (epd.Init() != 0) {
     USE_SERIAL.println("Failed to initialize EPD");
     return;
   }
-
+  
   // Enable debug output for troubleshooting
   epd.ShowDebug = true;
-
-  //epd.TurnOnDisplay();
-
-  //epd.Reset();
-
-
-
+  if (!epd.PixelFormatValid()) {
+    USE_SERIAL.println("ERROR: the display driver does not declare its pixel format; nothing will be drawn");
+  }
 
   print_wakeup_reason();
-  // Stored WiFi keeps failing (router or password changed): reopen the portal so it can be fixed
-  // without a reflash. The counter restarts, so an unattended portal timeout retries the stored WiFi.
-  bool reopenPortal = wifiFailCycles >= WIFI_FAIL_CYCLES_FOR_PORTAL;
+  // Stored WiFi keeps failing (router or password changed), or the server keeps rejecting the device code:
+  // reopen the portal so it can be fixed without a reflash. The counters restart, so an unattended portal
+  // timeout goes back to normal polling (with the back-off still in force).
+  bool authReopen = authFailCycles >= AUTH_FAIL_WAKES_FOR_PORTAL;
+  bool reopenPortal = authReopen || wifiFailCycles >= WIFI_FAIL_CYCLES_FOR_PORTAL;
   if (reopenPortal) {
-    USE_SERIAL.println("WiFi failed on repeated wakes; reopening the config portal");
+    USE_SERIAL.println(authReopen ? "Device code rejected on repeated wakes; reopening the config portal"
+                                  : "WiFi failed on repeated wakes; reopening the config portal");
+    portalReason = authReopen ? PORTAL_REASON_AUTH : PORTAL_REASON_WIFI;
     wifiFailCycles = 0;
+    authFailCycles = 0;
   }
   if (!reopenPortal && storedSSID.length() > 0 && EEPROM.read(CONFIG_FLAG_ADDR) == 1) {
+    if (epd.BusyTimedOut()) {
+      // The panel never released BUSY during Init (wrong carrier board, loose FPC, dead panel).
+      USE_SERIAL.println("Panel not responding; sleeping");
+      GoToSleep(nextFailureSleep());
+    }
     configComplete = true;
     WiFi.onEvent(WiFiEvent);
     WiFi.mode(WIFI_STA);
     WiFiMulti.addAP(storedSSID.c_str(), storedPassword.c_str());
-
+    
     // wait for WiFi connection
     USE_SERIAL.print("Waiting for WiFi to connect...");
     return;
   }
-
+  if (!reopenPortal) portalReason = 0;
+  
   epd.ClearFrame();
-  //epd.Clear(0xFF);      // Clear to white background (handles dual-buffer prep)
-  epd.QRset(4);    // Draw QR code (single step)
+  epd.QRset(6);    // Draw QR code; the scale is reduced to fit smaller panels
   epd.TurnOnDisplay(); // Refresh display
+  screenStale = true;  // the next successful poll redraws the picture even in holding mode
   startConfigPortal();
-
+  
   unsigned long portalWait=millis();
   while(apconnected == false && millis()-portalWait<300000UL) {
     server.handleClient();
     USE_SERIAL.print("a");
     delay(200);
   }
-  //epd.Clear(0x2);
 
 }
 
@@ -260,7 +269,7 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       USE_SERIAL.println(event);
   switch(event) {
     case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
-
+     
       USE_SERIAL.println("Station connected:");
       break;
     case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:
@@ -277,19 +286,30 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       case ARDUINO_EVENT_WIFI_STA_START:
          USE_SERIAL.println("sta start");
       break;
-
+    
     default:
       break;
   }
 }
 
 
-HTTPClient https;
+// Contract C6: a 503 from the device API carries {"status":"pending","secondsDelay":n} and Retry-After: n.
+// Returns n when it is 15..3600, else 0 (fall back to the back-off).
+long retryDelayFrom503(HTTPClient& request) {
+  long seconds=0;
+  int size=request.getSize();
+  if(size>0 && size<=1024) {
+    ResponseJson body;
+    if(!deserializeJson(body,request.getString()) && body["secondsDelay"].is<long>()) seconds=body["secondsDelay"].as<long>();
+  }
+  if(seconds==0 && request.hasHeader("Retry-After")) seconds=request.header("Retry-After").toInt();
+  return (seconds>=15 && seconds<=3600) ? seconds : 0;
+}
 
 // Device-scoped bearer authorization; legacy provisioned devices can still poll with their existing key.
 SlideShowStatus fetchSlide(bool advance) {
   SlideShowStatus status{};
-  status.retry=true; status.gotosleep=true; status.secondsdelay=60;
+  status.retry=true; status.gotosleep=true; status.secondsdelay=DEFAULT_SLEEP_TIME; status.httpCode=-1;
   WiFiClientSecure secure;
   secure.setCACert(EPAPER_ROOT_CA);
   HTTPClient request;
@@ -302,20 +322,27 @@ SlideShowStatus fetchSlide(bool advance) {
   request.addHeader("Content-Type","application/json");
   if(deviceAuth) request.addHeader("Authorization",String("Bearer ")+storedDeviceId);
   else request.addHeader("Ocp-Apim-Subscription-Key",storedSubId);
+  const char* responseHeaders[]={"Retry-After"};
+  request.collectHeaders(responseHeaders,1);
   int code=request.POST("{}");
+  status.httpCode=code;
   if(code==HTTP_CODE_OK && request.getSize()<=4096) {
-    StaticJsonDocument<1024> result;
+    ResponseJson result;
     auto error=deserializeJson(result,request.getString());
     if(!error && result["gotoSleep"].is<bool>() && result["secondsDelay"].is<long>()) {
-      status.secondsdelay=constrain(result["secondsDelay"].as<long>(),1L,604800L);
+      status.secondsdelay=constrain(result["secondsDelay"].as<long>(),(long)MIN_SECONDS_DELAY,604800L);
       status.gotosleep=result["gotoSleep"].as<bool>();
-      if(!advance || result["fileName"].is<const char*>()) {
+      if(advance && result["fileName"].isNull()) {
+        status.retry=false;   // empty slideshow: nothing to show, sleep secondsDelay
+      } else if(!advance || result["fileName"].is<const char*>()) {
         status.filename=result["fileName"].as<String>();
         if(!advance || (status.filename.indexOf('/')<0 && status.filename.indexOf('\\')<0 && status.filename.indexOf("..")<0)) {
-          status.retry=false; status.didcall=true;
+          status.retry=false;
         }
       }
     }
+  } else if(code==HTTP_CODE_SERVICE_UNAVAILABLE) {
+    status.serverDelay=retryDelayFrom503(request);
   }
   request.end();
   return status;
@@ -335,140 +362,185 @@ void GoToSleep(long seconds)
                 esp_sleep_enable_timer_wakeup(constrain(seconds,1L,604800L) * uS_TO_S_FACTOR);
                 USE_SERIAL.println("Setup ESP32 to sleep for every " + String(seconds) +  " Seconds");
                 USE_SERIAL.println("Going to sleep now");
-                USE_SERIAL.flush();
+                USE_SERIAL.flush(); 
                 esp_deep_sleep_start();
 
 }
 
-int loopcount=0;
-bool once=false;
-SlideShowStatus slideShowStatus{};
-int dstatus=0;
+// Exponential back-off for consecutive failed wakes (WiFi, NTP, API, unresponsive panel):
+// 60, 120, 240, ... capped at 3600 s. Reset by any successful poll.
+long nextFailureSleep() {
+  long seconds=(long)BACKOFF_FIRST_SLEEP << (apiFailCycles<6 ? apiFailCycles : 6);
+  if(seconds>BACKOFF_MAX_SLEEP) seconds=BACKOFF_MAX_SLEEP;
+  if(apiFailCycles<255) apiFailCycles++;
+  return seconds;
+}
+void failureSleep() { GoToSleep(nextFailureSleep()); }
+
+// HTTP 401: the device code is unknown or was revoked. After AUTH_FAIL_WAKES_FOR_PORTAL consecutive wakes
+// like this the device restarts into the setup portal so a new code can be entered.
+void authFailureSleep() {
+  if(authFailCycles<255) authFailCycles++;
+  USE_SERIAL.print("Device code rejected (HTTP 401), wake ");
+  USE_SERIAL.println(authFailCycles);
+  if(authFailCycles>=AUTH_FAIL_WAKES_FOR_PORTAL) GoToSleep(1);
+  failureSleep();
+}
+
+// A failed API call ends the wake: 401 counts toward the portal, a 503 with a delay is obeyed, anything
+// else backs off. Returns only when the call succeeded.
+void endWakeIfFailed(const SlideShowStatus& status) {
+  if(!status.retry) return;
+  USE_SERIAL.print("API call failed, HTTP ");
+  USE_SERIAL.println(status.httpCode);
+  if(status.httpCode==HTTP_CODE_UNAUTHORIZED) authFailureSleep();
+  if(status.serverDelay>0) GoToSleep(status.serverDelay);
+  failureSleep();
+}
+bool worthRetrying(const SlideShowStatus& status) {
+  return status.retry && status.serverDelay==0 && (status.httpCode<0 || status.httpCode>=500 || status.httpCode==HTTP_CODE_OK);
+}
+
+// XS-14: cloud .bin names start with the screen type they were built for ("{type}_{hash}.bin"; the type may
+// carry a panel prefix such as 730G and a flip suffix T). Refuse a file built for another base code; names
+// that do not follow the pattern pass (the Content-Length check still applies).
+bool screenCodeMatches(const String& fileName) {
+#if EPD_CHECK_SCREEN_CODE
+  int underscore=fileName.indexOf('_');
+  int query=fileName.indexOf('?');
+  if(underscore<=0 || underscore>16 || (query>=0 && query<underscore) || epd.screenCode==nullptr) return true;
+  String type=fileName.substring(0,underscore);
+  for(unsigned i=0;i<type.length();++i) if(!isalnum((unsigned char)type[i])) return true;
+  type.toUpperCase();
+  if(type.length()>1 && type.endsWith("T")) type.remove(type.length()-1);
+  static const char* const bases[]={"ARS","ERS","V2A","AR","AS","BR","ER","ES","FR","GR","A","B","E","F","G"};
+  for(const char* base: bases) {
+    if(type.endsWith(base)) return strcmp(base,epd.screenCode)==0;
+  }
+#endif
+  return true;
+}
 
 
 void loop() {
   if (!configComplete) {
     static unsigned long recoveryStarted=millis();
-    if(millis()-recoveryStarted>300000UL) { GoToSleep(600); return; }
+    if(millis()-recoveryStarted>300000UL) { GoToSleep(TIMEOUT_SLEEP); return; }
     delay(1);
     // Handle client requests in configuration mode
     server.handleClient();
     return;
-  }
-
-
+  } 
+ 
+  static int loopcount=0;
   loopcount++;
-   USE_SERIAL.print("Loop = ");
-   USE_SERIAL.println(loopcount);
-    if(loopcount > LOOP_TIMEOUT) {
-    GoToSleep(TIMEOUT_SLEEP);
+  USE_SERIAL.print("Loop = ");
+  USE_SERIAL.println(loopcount);
+  if(loopcount > LOOP_TIMEOUT) {
+    failureSleep();   // no WiFi this wake
   }
-  if(WiFiMulti.run() == WL_CONNECTED) {
-      wifiConnectedThisWake = true;
-      wifiFailCycles = 0;
-      setClock();
-      delay(200);
-      USE_SERIAL.print("Device Id = ");
-      if(needDeviceIfo)
-      {
-        delay(2000);
-        for(int retryd = 0;retryd < 3;retryd++) {
-           dstatus=getDeviceInfo(storedDeviceId);
-           if(dstatus > 0) {
-            wakeup_reason = ESP_SLEEP_WAKEUP_UNDEFINED ; // reset to zero to forece screen refresh;
-             break;
-           }
-           else
-             delay(2000);
-        }
-      }
-
-      USE_SERIAL.print("User Id = ");
-      USE_SERIAL.println(storedUserId);
-      USE_SERIAL.print("Screen Name = ");
-      USE_SERIAL.println(storedScreenName);
-      if (storedUserId.length() == 0 || storedScreenName.length() == 0 || (!validDeviceId(storedDeviceId) && storedSubId.length() == 0)) {
-        USE_SERIAL.println(" empty  info");
-          delay(2000);
-          GoToSleep(TIMEOUT_SLEEP);
-        return;
-      }
-
-      if(slideShowStatus.didcall == false)
-          slideShowStatus = GetStart();
-      for(int apiAttempt=0; slideShowStatus.retry && apiAttempt<3; ++apiAttempt)
-      {
-        USE_SERIAL.println("Retry...");
-        delay(500);
-        slideShowStatus= GetStart();
-      }
-      USE_SERIAL.println();
-      USE_SERIAL.println("Waiting 10s before the next round...");
-      delay(500);
-      //MustRefresh();
-
-    if(slideShowStatus.gotosleep == true && wakeup_reason != 0)
-      {
-        GoToSleep(slideShowStatus.secondsdelay);
-      }
-      if(slideShowStatus.retry) { GoToSleep(600); return; }
-      slideShowStatus = GetFile();
-      if(slideShowStatus.retry) { GoToSleep(600); return; }
-      if(!slideShowStatus.retry && slideShowStatus.filename.length()>0)
-      {
-         for(int i=0;i< MAX_RETRIES ; i++)
-        {
-           dstatus = DownloadAndDisplay(slideShowStatus.filename,slideShowStatus.secondsdelay,i);
-           if(dstatus > 0)
-             break;
-            else{
-                USE_SERIAL.print("Retry DownloadAndDisplay, status: ");
-        USE_SERIAL.println(dstatus);
-        delay(5000);
-            }
-
-        }
-
-      }else
-      {
-          epd.Clear(0x1);
-         delay(500);
-      }
-  } else {
+  if(WiFiMulti.run() != WL_CONNECTED) {
     delay(1000);
+    delay(LOOP_DELAY);
+    return;
+  }
+  wifiConnectedThisWake = true;
+  wifiFailCycles = 0;
+  setClock();  
+  delay(200);
+  pollOnce();
+}
+
+// One poll per wake. Every path ends in deep sleep, and the slideshow advances at most once.
+void pollOnce() {
+  if(needDeviceIfo)
+  {
+    delay(2000);
+    int info=0;
+    for(int retryd = 0;retryd < 3;retryd++) {
+      info=getDeviceInfo(storedDeviceId);
+      if(info!=0) break;
+      delay(2000);
+    }
+    if(info==-HTTP_CODE_UNAUTHORIZED) authFailureSleep();
+    if(info>0) wakeup_reason = ESP_SLEEP_WAKEUP_UNDEFINED ; // reset to zero to force screen refresh
   }
 
-  delay(LOOP_DELAY);
-}
-void Download2(String filename)
-{
-      String fullPath ="https://epaperstore.blob.core.windows.net/epaperfiles/"+filename;
-      USE_SERIAL.println("[fullPath]");
-      USE_SERIAL.println(fullPath);
+  USE_SERIAL.print("User Id = ");
+  USE_SERIAL.println(storedUserId);
+  USE_SERIAL.print("Screen Name = ");
+  USE_SERIAL.println(storedScreenName);
+  if (storedUserId.length() == 0 || storedScreenName.length() == 0 || (!validDeviceId(storedDeviceId) && storedSubId.length() == 0)) {
+    USE_SERIAL.println(" empty  info");
+    failureSleep();
+  }
+
+  SlideShowStatus start = GetStart();
+  for(int apiAttempt=0; worthRetrying(start) && apiAttempt<3; ++apiAttempt)
+  {
+    USE_SERIAL.println("Retry...");
+    delay(500);
+    start = GetStart();
+  }
+  endWakeIfFailed(start);
+  apiFailCycles = 0;      // successful poll: back-off and 401 count start over
+  authFailCycles = 0;
+
+  // On a timer wake the server may say nothing changed. A cold boot, fresh device info, or a picture
+  // overwritten by the setup QR always fetches and draws the current item.
+  bool mustRefresh = wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED || screenStale;
+  if(start.gotosleep && !mustRefresh) GoToSleep(start.secondsdelay);
+
+  SlideShowStatus slide = GetFile();   // advances the server-side cursor: called exactly once per wake
+  endWakeIfFailed(slide);
+  if(slide.filename.length()==0) {
+    USE_SERIAL.println("Nothing to show");
+    GoToSleep(slide.secondsdelay);
+  }
+  if(!screenCodeMatches(slide.filename)) {
+    USE_SERIAL.print("Skipping an image built for another screen type; this panel shows ");
+    USE_SERIAL.println(epd.screenCode);
+    GoToSleep(slide.secondsdelay);
+  }
+  for(int attempt=0; attempt<DOWNLOAD_ATTEMPTS; attempt++)
+  {
+    int result = DownloadAndDisplay(slide.filename, attempt);
+    if(result == DL_OK) { screenStale = false; GoToSleep(slide.secondsdelay); }
+    if(result == DL_PANEL) { long backoff=nextFailureSleep(); GoToSleep(max(slide.secondsdelay, backoff)); }
+    USE_SERIAL.print("DownloadAndDisplay failed, status: ");
+    USE_SERIAL.println(result);
+    if(result == DL_TERMINAL) break;
+    delay(5000);
+  }
+  // A failed download ends the wake; the next wake moves on instead of advancing again now.
+  GoToSleep(slide.secondsdelay);
 }
 
-int DownloadAndDisplay(String filename, long sleepseconds, int retrycnt) {
+int DownloadAndDisplay(const String& filename, int attempt) {
+  if(!epd.PixelFormatValid()) return DL_TERMINAL;
   WiFiClientSecure secure;
   secure.setCACert(EPAPER_ROOT_CA);
   HTTPClient request;
   request.setConnectTimeout(10000); request.setTimeout(15000);
-  String url=String(retrycnt>1?BLOB_URL_SECONDARY:BLOB_URL_PRIMARY)+filename;
-  if(!request.begin(secure,url)) return 0;
-  if(request.GET()!=HTTP_CODE_OK) { request.end(); return 0; }
+  String url=String(attempt>=DOWNLOAD_ATTEMPTS-1?BLOB_URL_SECONDARY:BLOB_URL_PRIMARY)+filename;
+  if(!request.begin(secure,url)) return DL_TRANSIENT;
+  int code=request.GET();
+  if(code!=HTTP_CODE_OK) { request.end(); return (code>=400 && code<500) ? DL_TERMINAL : DL_TRANSIENT; }
   long expected=(long)epd.steps*epd.blockSize;
-  if(expected<=0 || request.getSize()!=expected) { request.end(); return -3; }
+  if(expected<=0 || request.getSize()!=expected) { request.end(); return DL_TERMINAL; }
   for(int step=0;step<epd.steps;++step) {
     epd.SendCommand(epd.stepCommands[step]); epd.SetToDataMode();
     bool complete=readFramePlane(request,epd.blockSize,[&](uint8_t* data,int count) {
-      for(int i=0;i<count;++i) epd.SendDataFast(data[i]);
+      for(int i=0;i<count;++i) epd.SendStreamByte(data[i],step);
     });
-    if(!complete) { request.end(); return -2; }
+    if(!complete) { request.end(); return DL_TRANSIENT; }
   }
   request.end(); epd.TurnOnDisplay();
-  GoToSleep(sleepseconds); return 1;
+  return epd.BusyTimedOut() ? DL_PANEL : DL_OK;
 }
 
 
+// Returns 1 on success, -401 when the server rejects the device code, 0 on any other failure.
 int getDeviceInfo(String deviceId) {
   if(!validDeviceId(deviceId)) return 0;
   WiFiClientSecure secure;
@@ -481,14 +553,16 @@ int getDeviceInfo(String deviceId) {
   int code=request.POST("{}");
   bool valid=false;
   if(code==HTTP_CODE_OK && request.getSize()<=4096) {
-    StaticJsonDocument<1024> result;
+    ResponseJson result;
     if(!deserializeJson(result,request.getString()) && result["AccountID"].is<const char*>() && result["SlideShowId"].is<const char*>()) {
       String user=result["AccountID"].as<String>(), screen=result["SlideShowId"].as<String>();
       valid=user.length()>0 && user.length()<=64 && screen.length()>0 && screen.length()<=64;
       if(valid) { saveDeviceInfo("",user,screen); needDeviceIfo=0; }
     }
   }
-  request.end(); return valid?1:0;
+  request.end();
+  if(code==HTTP_CODE_UNAUTHORIZED) return -HTTP_CODE_UNAUTHORIZED;
+  return valid?1:0;
 }
 
 
@@ -497,6 +571,7 @@ void startConfigPortal() {
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASSWORD);
    WiFi.onEvent(WiFiEvent);
+  portalToken = String(esp_random(), HEX);
   IPAddress IP = WiFi.softAPIP();
   USE_SERIAL.print("AP IP address: ");
   USE_SERIAL.println(IP);
@@ -511,13 +586,13 @@ void startConfigPortal() {
   }
   USE_SERIAL.print("Then access the configuration page at: http://");
   USE_SERIAL.println(IP);
-
+  
   // Set up web server routes
   server.on("/", HTTP_GET, handleRoot);
   server.on("/save", HTTP_POST, handleSave);
-  server.on("/reset", HTTP_GET, handleReset);
+  server.on("/reset", HTTP_POST, handleReset);   // POST only: a link or prefetch cannot erase settings
   server.onNotFound(handleNotFound);
-
+  
   // Start the server
   server.begin();
   USE_SERIAL.println("HTTP server started");
@@ -596,69 +671,63 @@ void saveDeviceInfo(String subscriptionId, String userId, String screenName) {
 }
 
 
-void clearCredentials() {
-  // Clear the configuration flag
-  EEPROM.write(CONFIG_FLAG_ADDR, 0);
-  EEPROM.commit();
-
-  storedSSID = "";
-  storedPassword = "";
-  // storedSubId= "";
-  // storedScreenName ="";
-  // storedDeviceId = "";
-
-  USE_SERIAL.println("Cleared  Wifi Credentials");
+// Factory reset: zero-fill every stored secret and identifier (SSID, password, device code, subscription,
+// account, screen name), clear both flags and commit. The v2 layout marker stays so nothing is "migrated".
+void wipeSettings() {
+  writeSetting(SSID_ADDR,33,""); writeSetting(PASS_ADDR,65,""); writeSetting(DEV_ID,65,"");
+  writeSetting(SUB_ID,65,""); writeSetting(USR_ID,65,""); writeSetting(SCR_NAME,65,"");
+  EEPROM.write(GET_INFO_ADDR,0); EEPROM.write(CONFIG_FLAG_ADDR,0);
+  EEPROM.write(500,0xE2); EEPROM.write(501,2); EEPROM.commit();
+  storedSSID = ""; storedPassword = ""; storedDeviceId = "";
+  storedSubId = ""; storedUserId = ""; storedScreenName = "";
+  USE_SERIAL.println("All stored settings erased");
 }
 
-
-void clearEEPROM() {
-  // Clear the configuration flag
-  //EEPROM.write(CONFIG_FLAG_ADDR, 0);
-  //EEPROM.commit();
-
-  // Clear existing data first
-  for (int i = 0; i < CONFIG_FLAG_ADDR+5; i++) {
-    EEPROM.write(i, 0);
-  }
-
-  EEPROM.commit();
-  storedSSID = "";
-  storedPassword = "";
-  storedSubId= "";
-  storedScreenName ="";
-  storedDeviceId = "";
-
-  USE_SERIAL.println("Cleared  EEPROM");
+// The stored device code is the device's bearer credential: never send it back, only its last 4 characters.
+String maskedDeviceId() {
+  if(!validDeviceId(storedDeviceId)) return String();
+  return "&bull;&bull;&bull;&bull;" + htmlEscape(storedDeviceId.substring(storedDeviceId.length()-4));
 }
 
 void handleRoot() {
   String html;
   char buffer[2048];
-
+  
   // Build HTML header with style
   sprintf(buffer, HTML_HEADER, HTML_STYLE);
   html = String(buffer);
-
+  
   html += "<h1>WiFi Setup</h1>";
-
-  if (storedSSID.length() > 0 && EEPROM.read(CONFIG_FLAG_ADDR) == 1) {
+  if (portalReason == PORTAL_REASON_AUTH) {
+    html += "<div class=\"status error\">The server did not accept the stored device code. Enter the device code shown for this device in the epaperpix.app portal.</div>";
+  } else if (portalReason == PORTAL_REASON_WIFI) {
+    html += "<div class=\"status error\">The stored WiFi network could not be reached on the last few attempts.</div>";
+  }
+  
+  bool configured = storedSSID.length() > 0 && EEPROM.read(CONFIG_FLAG_ADDR) == 1;
+  if (configured) {
     html += "<div class=\"status success\">Currently configured WiFi: <strong>" + htmlEscape(storedSSID) + "</strong></div>";
   }
-
+  String masked = maskedDeviceId();
+  
   html += "<form action=\"/save\" method=\"POST\">";
   html +="<label for=\"wifi-ssid\">Wi-Fi Name (SSID)</label>";
-  html +="<input type=\"text\" id=\"wifi-ssid\" name=\"username\" autocomplete=\"username\" placeholder=\"MyHomeWiFi\">";
+  html +="<input type=\"text\" id=\"wifi-ssid\" name=\"username\" autocomplete=\"username\" maxlength=\"32\" placeholder=\"" + String(configured ? "Leave blank to keep the current network" : "MyHomeWiFi") + "\">";
   html +="<label for=\"wifi-password\">Wi-Fi Password</label>";
-  html +="<input type=\"password\" id=\"wifi-password\" name=\"wifi-password\" autocomplete=\"current-password\" placeholder=\"*******\">";
+  html +="<input type=\"password\" id=\"wifi-password\" name=\"wifi-password\" autocomplete=\"current-password\" maxlength=\"64\" placeholder=\"" + String(configured ? "Leave blank to keep the saved password" : "*******") + "\">";
   html += "<label for=\"device-id\">Device Id:</label>";
-  html += "<input type=\"text\" id=\"device-id\" name=\"device-id\" autocomplete=\"off\" value=\"" + htmlEscape(storedDeviceId) + "\">";
+  html += "<input type=\"text\" id=\"device-id\" name=\"device-id\" autocomplete=\"off\" maxlength=\"32\" placeholder=\"" + String(masked.length() > 0 ? "Leave blank to keep the saved code" : "32-character code from the portal") + "\">";
+  if (masked.length() > 0) html += "<p><small>Saved device code ends in " + masked + ".</small></p>";
   html += "<div class=\"buttons\">";
   html += "<input type=\"submit\" value=\"Save & Connect\">";
-  html += "<button type=\"button\" class=\"red\" onclick=\"window.location.href='/reset'\">Reset</button>";
   html += "</div></form>";
-  html += "<p><small>Saving tests the connection first (up to 20 seconds); nothing is stored unless it connects.</small></p>";
+  html += "<p><small>Saving tests the connection first (up to 20 seconds); nothing is stored unless it connects. A blank password keeps the saved one only when the network name is unchanged.</small></p>";
+  html += "<form action=\"/reset\" method=\"POST\" onsubmit=\"return confirm('Erase the WiFi settings and the device code?')\">";
+  html += "<input type=\"hidden\" name=\"token\" value=\"" + portalToken + "\">";
+  html += "<label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" required> Erase all saved settings</label>";
+  html += "<div class=\"buttons\"><button type=\"submit\" class=\"red\">Reset</button></div></form>";
   html += FPSTR(HTML_FOOTER);
-
+  
   server.send(200, "text/html", html);
 }
 
@@ -667,15 +736,19 @@ void handleSave() {
     String ssid = server.arg("username");
     String password = server.arg("wifi-password");
     String deviceid = server.arg("device-id");
-    deviceid.trim();
-    if(!validDeviceId(deviceid)) { server.send(400,"text/plain","Enter the 32-character device code from the portal"); return; }
-
+    
     // Input validation and sanitization
     ssid.trim();
     // Password whitespace is significant.
     deviceid.trim();
-
-    if (ssid.length() > 0 && ssid.length() <= EEPROM_STRING_SIZE - 1 &&
+    // Blank fields keep what is stored, so a re-opened portal can fix one setting without re-typing (or
+    // ever displaying) the others. A blank password is kept only for the same network name.
+    if (ssid.length() == 0) ssid = storedSSID;
+    if (password.length() == 0 && ssid == storedSSID) password = storedPassword;
+    if (deviceid.length() == 0) deviceid = storedDeviceId;
+    if(!validDeviceId(deviceid)) { server.send(400,"text/plain","Enter the 32-character device code from the portal"); return; }
+    
+    if (ssid.length() > 0 && ssid.length() <= EEPROM_STRING_SIZE - 1 && 
         password.length() <= EEPROM_PASS_SIZE - 1) {
       // Test before saving: stored details that cannot connect would skip the portal on every boot.
       // AP_STA keeps the soft AP (and this request) alive while the station tries the router.
@@ -711,6 +784,8 @@ void handleSave() {
         USE_SERIAL.println(WiFi.localIP());
         configComplete = true;
         wifiFailCycles = 0;
+        authFailCycles = 0;
+        portalReason = 0;
         wifiConnectedThisWake = true;
         delay(1000); // let the response reach the phone
         USE_SERIAL.print("Reboot: ");
@@ -730,21 +805,25 @@ void handleSave() {
 }
 
 void handleReset() {
-  clearCredentials();
-
+  if (server.arg("confirm") != "yes" || portalToken.length() == 0 || server.arg("token") != portalToken) {
+    server.send(400, "text/plain", "Tick the confirmation box on the setup page to erase the settings");
+    return;
+  }
+  wipeSettings();
+  
   String html;
   char buffer[2048];
-
+  
   // Build HTML header with style
   sprintf(buffer, HTML_HEADER, HTML_STYLE);
   html = String(buffer);
-
+  
   html += "<meta http-equiv=\"refresh\" content=\"3;url=/\">";
   html += "<h1>WiFi Setup</h1>";
-  html += "<div class=\"status info\">WiFi credentials have been reset.</div>";
+  html += "<div class=\"status info\">All saved settings (WiFi and device code) have been erased.</div>";
   html += "<p>Redirecting back to setup page in 3 seconds...</p>";
   html += FPSTR(HTML_FOOTER);
-
+  
   server.send(200, "text/html", html);
 }
 

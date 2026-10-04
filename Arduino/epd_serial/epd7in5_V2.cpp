@@ -46,6 +46,7 @@
 // Pixel format for this display
 #define EPD_BITS_PER_PIXEL 1    // Monochrome: 1 byte per pixel  
 #define EPD_PIXELS_PER_BYTE 8   // Each byte is one pixel
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
 
 unsigned char Voltage_Frame_7IN5_V2[]={
 	0x6, 0x3F, 0x3F, 0x11, 0x24, 0x7, 0x17,
@@ -118,8 +119,14 @@ Epd::Epd() {
     //stepCommands[0]=0x13;
     stepCommands[0]=0x10;
     stepCommands[1]=0x13;
+    // Serial-only variant: Builder code V2A sends the mono image twice, black = 1 in both planes. Init runs
+    // the UC8179 in KWR mode (panel setting 0x0F, CDI 0x10): the 0x10 black/white RAM uses 1 = white
+    // (ClearFrame writes 0xFF), so plane 0 is complemented; plane 1 goes to 0x13 unchanged (black = 1).
+    // This is the combination the serial sketch has driven this panel with since 2026-04.
+    screenCode = "V2A";
+    stepInvert[0] = true;
+    stepInvert[1] = false;
     ShowDebug = false;
-    qr_color = 0xFF;
 };
 
 int Epd::Init(void) {
@@ -320,12 +327,8 @@ void Epd::SendDataFast(unsigned char data) {
 //     DelayMs(200);
 // }
 void Epd::WaitUntilIdle(void) {
-    unsigned char busy;
     Serial.print("e-Paper Busy\r\n ");
-    do{
-        SendCommand(0x71);
-        busy = DigitalRead(busy_pin);
-    }while(busy == 0);
+    WaitWhileBusy(LOW, 1, 0x71);        // poll "get status"; BUSY low: busy
     Serial.print("e-Paper Busy Release\r\n ");
     DelayMs(20);
 }

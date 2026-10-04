@@ -9,6 +9,18 @@
 #define UBYTE   unsigned char
 #define UDOUBLE unsigned long
 
+// Longest any single BUSY wait may take before the frame is abandoned (see Epd::WaitWhileBusy).
+// A full refresh of the slowest supported panel (7.3" ACeP) takes about 35 s; drivers may raise it.
+#ifndef EPD_BUSY_TIMEOUT_MS
+#define EPD_BUSY_TIMEOUT_MS 45000UL
+#endif
+
+// Compile-time check every driver places next to its EPD_BLOCK_SIZE: one cloud .bin plane must be
+// exactly planeWidth x planeHeight pixels at the driver's stream bits per pixel.
+#define EPD_CHECK_PLANE(planeWidth, planeHeight, bitsPerPixel, blockSize) \
+    static_assert((unsigned long)(blockSize) * 8UL == (unsigned long)(planeWidth) * (unsigned long)(planeHeight) * (unsigned long)(bitsPerPixel), \
+                  "EPD_BLOCK_SIZE does not match the plane geometry and bits per pixel")
+
 #define QRDIM 32
 const uint8_t wifi_qrcode_32x32_data[] = {
     0x00, 0x00, 0x00, 0x00, 0x7F, 0x4F, 0x09, 0xFC, 0x41, 0x31, 0x2D, 0x04, 0x5D, 0x17, 0x49, 0x74, 0x5D, 0x06, 0x89, 0x74, 0x5D, 0x2B, 0x29, 0x74, 0x41, 0x17, 0x45, 0x04, 0x7F, 0x55, 0x55, 0xFC, 0x00, 0x5A, 0x0C, 0x00, 0x6D, 0x39, 0xA1, 0x04, 0x64, 0x67, 0x3A, 0x44, 0x7F, 0x9A, 0xF7, 0x30, 0x06, 0x7C, 0xE0, 0xC0, 0x0D, 0x2C, 0x29, 0x44, 0x22, 0xE3, 0x91, 0xE0, 0x2F, 0x6D, 0xE9, 0xB4, 0x32, 0x49, 0x5F, 0x3C, 0x75, 0xF6, 0xC0, 0x3C, 0x48, 0x7E, 0x9E, 0xE4, 0x6D, 0x5B, 0xBB, 0x74, 0x7E, 0x3E, 0x48, 0x7C, 0x6D, 0x69, 0x8F, 0xD4, 0x00, 0x4D, 0xA4, 0x4C, 0x7F, 0x2A, 0x8D, 0x40, 0x41, 0x15, 0x2C, 0x60, 0x5D, 0x60, 0xAF, 0xD0, 0x5D, 0x6D, 0xCE, 0x54, 0x5D, 0x33, 0xBA, 0xDC, 0x41, 0x70, 0x09, 0x74, 0x7F, 0x7E, 0x8C, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -28,7 +40,14 @@ public:
     unsigned long height;
     unsigned char steps;
     unsigned char stepCommands[4];
+    // Per step: complement every byte of that cloud .bin plane before it reaches the panel. Each driver sets
+    // this explicitly from the Builder code it displays (screenCode) and the polarity of its RAM; see the
+    // polarity table in CLAUDE.md. Never a global rule: the Builder codes do not share one polarity.
+    bool stepInvert[4] = {false, false, false, false};
     unsigned long blockSize;
+    // Builder screen-type base code this driver displays ("A", "AR", "AS", "V2A", "B", "BR", "G", "GR", "F").
+    // Used by QRset (stream polarity) and by the sketch to reject a .bin made for another panel.
+    const char* screenCode = nullptr;
     Epd();
     ~Epd();
     int  Init(void);
@@ -42,7 +61,6 @@ public:
     void SendDataFast(unsigned char data);
     void Sleep(void);
     void ClearFrame(void);
-    //void Clear();
     void Clear(unsigned char color);
     void TurnOnDisplay(void);
     void QRset(int scale);
@@ -50,18 +68,63 @@ public:
     void SetFrameStart(char mode, unsigned char command);
     void SendBuffer(unsigned char* buffer, int size);
     bool ShowDebug;
-    unsigned char EncodePixelByte(unsigned char value, int plane) const { return bits_per_pixel==1 && plane==0 ? (unsigned char)~value : value; }
+
+    // One byte of cloud .bin plane `step` (data mode already selected): apply the driver's polarity for that
+    // step and clock it out. The download loop, the serial bridge and QRset all go through here.
+    void SendStreamByte(unsigned char value, int step) {
+        if (stepInvert[step & 3]) value = (unsigned char)~value;
+        if (expand_1bpp_to_4bpp) {
+            // 7.5" V1 (UC8159): its RAM holds 4 bits per pixel; stream bit 1 = black (0x0), 0 = white (0x3).
+            for (int bit = 7; bit > 0; bit -= 2) {
+                unsigned char hi = (value >> bit) & 1 ? 0x0 : 0x3;
+                unsigned char lo = (value >> (bit - 1)) & 1 ? 0x0 : 0x3;
+                SendDataFast((unsigned char)((hi << 4) | lo));
+            }
+            return;
+        }
+        SendDataFast(value);
+    }
+    // True once any BUSY wait has timed out since boot. Later waits return at once so the caller can
+    // abandon the frame and sleep instead of hanging with the radio on.
+    bool BusyTimedOut() const { return busy_timed_out; }
+    void ClearBusyTimeout() { busy_timed_out = false; }   // the serial bridge retries after a re-Init
+    // Every driver must set these; a zero here means a driver forgot (QRset and the sketches refuse to stream).
+    bool PixelFormatValid() const {
+        return (bits_per_pixel == 1 || bits_per_pixel == 2 || bits_per_pixel == 4) && pixels_per_byte * bits_per_pixel == 8
+            && steps >= 1 && steps <= 4 && height > 0 && blockSize > 0 && blockSize % height == 0 && screenCode != nullptr;
+    }
+    unsigned char BitsPerPixel() const { return bits_per_pixel; }
 private:
     unsigned int reset_pin;
     unsigned int dc_pin;
     unsigned int cs_pin;
     unsigned int busy_pin;
-    unsigned char bits_per_pixel = 1;
-    unsigned char pixels_per_byte = 8;
-    unsigned char qr_color = 0;
+    unsigned char bits_per_pixel = 0;   // bits per pixel of the cloud stream (and of the panel RAM, except the 7.5" V1)
+    unsigned char pixels_per_byte = 0;
+    bool expand_1bpp_to_4bpp = false;
+    unsigned long busy_timeout_ms = EPD_BUSY_TIMEOUT_MS;
+    bool busy_timed_out = false;
 
+    // Bounded BUSY wait shared by every driver: waits while the BUSY pin reads busyLevel. The pin is pulled
+    // toward the released level, so a missing panel or open FPC ends the wait instead of floating.
+    // pollCommand >= 0 is sent before each read (UC8179 "get status" 0x71). Returns false on timeout.
+    bool WaitWhileBusy(int busyLevel, unsigned int pollMs, int pollCommand = -1) {
+        if (busy_timed_out) return false;
+        pinMode(busy_pin, busyLevel == HIGH ? INPUT_PULLDOWN : INPUT_PULLUP);
+        unsigned long started = millis();
+        for (;;) {
+            if (pollCommand >= 0) SendCommand((unsigned char)pollCommand);
+            if (DigitalRead(busy_pin) != busyLevel) return true;
+            if (millis() - started >= busy_timeout_ms) {
+                busy_timed_out = true;
+                Serial.println("ERROR busy-timeout: the panel did not release BUSY (check the carrier board BUSY pin and the FPC)");
+                return false;
+            }
+            DelayMs(pollMs > 0 ? pollMs : 1);
+        }
+    }
 };
 
-#endif /* EPD7IN5B_H */
+#endif /* EPD_BASE_H */
 
 /* END OF FILE */

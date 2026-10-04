@@ -32,9 +32,9 @@
 #include "epdif.h"
 #include <SPI.h>
 
-#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3  || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+#ifdef EPD_XIAO_SPI
 static const int spiClk = 1000000; // 1 MHz
-SPIClass *vspi;
+SPIClass *vspi = nullptr;
 #endif
 
 EpdIf::EpdIf() {
@@ -67,20 +67,22 @@ int EpdIf::IfInit(void) {
     DigitalWrite(PWR_PIN, 1);
 #endif
 
-#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3  || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
-    // XIAO ESP32-S2/S3/C3/C6 specific pin setup
-    pinMode(PIN_SPI_SCK, OUTPUT);
-    pinMode(PIN_SPI_DIN, OUTPUT);
+#ifdef EPD_XIAO_SPI
+    // XIAO ESP32-S2/S3/C3/C6 pin setup
     digitalWrite(PIN_SPI_CS, HIGH);
-    digitalWrite(PIN_SPI_SCK, LOW);
     digitalWrite(PIN_SPI_RST, LOW);
     
-    // Initialize VSPI
-    vspi = new SPIClass(SPI);
-    vspi->begin(VSPI_SCLK, VSPI_MISO, VSPI_MOSI, VSPI_SS);
-    pinMode(vspi->pinSS(), OUTPUT);
-    vspi->setDataMode(SPI_MODE0);
-    vspi->setClockDivider(SPI_CLOCK_DIV2);
+    // Initialize VSPI once: Init() runs again after every interrupted serial frame and must not leak
+    if (vspi == nullptr) {
+        pinMode(PIN_SPI_SCK, OUTPUT);
+        pinMode(PIN_SPI_DIN, OUTPUT);
+        digitalWrite(PIN_SPI_SCK, LOW);
+        vspi = new SPIClass(SPI);
+        vspi->begin(VSPI_SCLK, VSPI_MISO, VSPI_MOSI, VSPI_SS);
+        pinMode(vspi->pinSS(), OUTPUT);
+        vspi->setDataMode(SPI_MODE0);
+        vspi->setClockDivider(SPI_CLOCK_DIV2);
+    }
 #else
     // Standard SPI initialization
     SPI.begin();
@@ -92,7 +94,7 @@ int EpdIf::IfInit(void) {
 
 void EpdIf::SpiTransfer(unsigned char data) {
     digitalWrite(CS_PIN, LOW);
-#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+#ifdef EPD_XIAO_SPI
     vspi->transfer(data);
 #else
     SPI.transfer(data);

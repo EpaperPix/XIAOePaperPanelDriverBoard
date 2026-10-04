@@ -59,7 +59,12 @@
 #define EPD_WIDTH       640
 #define EPD_HEIGHT      384
 #define EPD_STEPS      1
-#define EPD_BLOCK_SIZE  61440
+// The cloud sends a 1-bit A plane (640 x 384 / 8 = 30720 bytes); the UC8159 RAM holds 4 bits per pixel
+// (122880 bytes, 0x0 black, 0x3 white), so SendStreamByte expands every stream bit into one RAM pixel.
+#define EPD_BLOCK_SIZE  30720
+#define EPD_BITS_PER_PIXEL 1
+EPD_CHECK_PLANE(EPD_WIDTH, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);
+static_assert((unsigned long)EPD_WIDTH * EPD_HEIGHT / 2 == 4UL * EPD_BLOCK_SIZE, "4-bpp RAM plane is four times the stream plane");
 
 Epd::~Epd() {
 };
@@ -74,6 +79,14 @@ Epd::Epd() {
     steps = EPD_STEPS;
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0] = 0x10;
+    bits_per_pixel = EPD_BITS_PER_PIXEL;
+    pixels_per_byte = 8;
+    expand_1bpp_to_4bpp = true;
+    // Builder code A: 1 bit per pixel, black = 1. The expansion maps 1 to black (0x0) and 0 to white
+    // (0x3), the nibble codes Waveshare's epd7in5 DisplayFrame and this ClearFrame (0x33) use.
+    // No inversion on top of that.
+    screenCode = "A";
+    stepInvert[0] = false;
 };
 
 int Epd::Init(void) {
@@ -137,6 +150,7 @@ void Epd::SendCommand(unsigned char command) {
  *  @brief: basic function for sending data
  */
 void Epd::SendData(unsigned char data) {
+    DigitalWrite(dc_pin, HIGH);         // init parameters are data, not commands
     SpiTransfer(data);
 }
 
@@ -152,9 +166,7 @@ void Epd::SetToDataMode() {
  *  @brief: Wait until the busy_pin goes HIGH
  */
 void Epd::WaitUntilIdle(void) {
-    while(DigitalRead(busy_pin) == 0) {      //0: busy, 1: idle
-        DelayMs(100);
-    }      
+    WaitWhileBusy(LOW, 100);            //0: busy, 1: idle
 }
 
 /**

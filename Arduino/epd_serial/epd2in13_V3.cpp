@@ -39,6 +39,8 @@
 #define EPD_HEIGHT      250
 #define EPD_STEPS      1
 #define EPD_BLOCK_SIZE  4000  // 16 bytes per 122-px row * 250 rows
+#define EPD_BITS_PER_PIXEL 1
+EPD_CHECK_PLANE(128, EPD_HEIGHT, EPD_BITS_PER_PIXEL, EPD_BLOCK_SIZE);   // RAM rows are 128 px (16 bytes)
 
 // SSD1680 RAM window and address counter (Waveshare EPD_2in13_V3_SetWindows/SetCursor).
 // Restored before every WRITE_RAM (see SendCommand) so each frame, and a retry after a
@@ -82,6 +84,12 @@ Epd::Epd()
     steps = EPD_STEPS;
     blockSize = EPD_BLOCK_SIZE;
     stepCommands[0] = 0x24;
+    bits_per_pixel = EPD_BITS_PER_PIXEL;
+    pixels_per_byte = 8;
+    // Builder code AR: 1 bit per pixel, white = 1, rotated for this portrait panel (generated 128 wide).
+    // SSD1680 RAM: 1 = white (ClearFrame writes 0xFF). Same polarity: sent unchanged.
+    screenCode = "AR";
+    stepInvert[0] = false;
 };
 
 void Epd::SendCommand(unsigned char command)
@@ -108,11 +116,7 @@ void Epd::SetToDataMode() {
 
 void Epd::WaitUntilIdle(void)
 {
-    while(1) {      //LOW: idle, HIGH: busy
-        if(DigitalRead(busy_pin) == 0)
-            break;
-        DelayMs(10);
-    }
+    WaitWhileBusy(HIGH, 10);            //LOW: idle, HIGH: busy
 }
 
 int Epd::Init(void)
