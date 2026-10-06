@@ -17,6 +17,8 @@
 #include <HardwareSerial.h>
 #include "epd_base.h"
 #include <WiFi.h>
+#include "WiFiEventLog.h"
+#include "ClockSync.h"
 #include <WiFiMulti.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
@@ -152,26 +154,6 @@ struct SlideShowStatus
 #define DL_TERMINAL -3     // size mismatch or HTTP 4xx: retrying in this wake cannot help
 #define DL_PANEL -4        // the panel kept BUSY asserted
 
-void setClock() {
-  configTime(0, 0, "pool.ntp.org");
-
-  USE_SERIAL.print(F("Waiting for NTP time sync: "));
-  time_t nowSecs = time(nullptr);
-  unsigned long ntpStarted=millis();
-  while (nowSecs < 8 * 3600 * 2) {
-    if(millis()-ntpStarted>=15000UL) { GoToSleep(nextFailureSleep()); return; }
-    delay(500);
-    USE_SERIAL.print(F("."));
-    yield();
-    nowSecs = time(nullptr);
-  }
-
-  USE_SERIAL.println();
-  struct tm timeinfo;
-  gmtime_r(&nowSecs, &timeinfo);
-  USE_SERIAL.print(F("Current time: "));
-  USE_SERIAL.print(asctime(&timeinfo));
-}
 
 
 WiFiMulti WiFiMulti;
@@ -204,8 +186,8 @@ void setup() {
 
    USE_SERIAL.begin(115200);
   needDeviceIfo = loadCredentials();
-  USE_SERIAL.print("needDeviceIfo =");
-  USE_SERIAL.println(needDeviceIfo);
+  USE_SERIAL.println(needDeviceIfo == 1 ? "Device info: fetching it from the server this wake"
+                     : needDeviceIfo == 0 ? "Device info: stored" : "Device info: not set up yet");
   USE_SERIAL.println(EPD_BOARD_NAME);
   
   if (epd.Init() != 0) {
@@ -244,7 +226,7 @@ void setup() {
     WiFiMulti.addAP(storedSSID.c_str(), storedPassword.c_str());
     
     // wait for WiFi connection
-    USE_SERIAL.print("Waiting for WiFi to connect...");
+    USE_SERIAL.println("Waiting for WiFi to connect...");
     return;
   }
   if (!reopenPortal) portalReason = 0;
@@ -265,31 +247,9 @@ void setup() {
 }
 
 void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
-    USE_SERIAL.println("WiFiEvent");
-      USE_SERIAL.println(event);
-  switch(event) {
-    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
-     
-      USE_SERIAL.println("Station connected:");
-      break;
-    case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:
-         USE_SERIAL.println("Station passed:");
-         apconnected = true;
-      break;
-    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
-         USE_SERIAL.println("disconned");
-      break;
-       case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-         // configComplete is set only by setup() (stored WiFi) or a verified save, never by STA events.
-         USE_SERIAL.println("got_ip");
-      break;
-      case ARDUINO_EVENT_WIFI_STA_START:
-         USE_SERIAL.println("sta start");
-      break;
-    
-    default:
-      break;
-  }
+  logWiFiEvent(event, info);
+  // The setup portal waits for a phone or laptop to get an address on the setup network.
+  if (event == ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED) apconnected = true;
 }
 
 
@@ -322,9 +282,10 @@ SlideShowStatus fetchSlide(bool advance) {
   request.addHeader("Content-Type","application/json");
   if(deviceAuth) request.addHeader("Authorization",String("Bearer ")+storedDeviceId);
   else request.addHeader("Ocp-Apim-Subscription-Key",storedSubId);
-  const char* responseHeaders[]={"Retry-After"};
-  request.collectHeaders(responseHeaders,1);
+  const char* responseHeaders[]={"Retry-After","Date"};
+  request.collectHeaders(responseHeaders,2);
   int code=request.POST("{}");
+  setClockFromHttpDate(request.header("Date"));   // keeps the clock right without NTP
   status.httpCode=code;
   if(code==HTTP_CODE_OK && request.getSize()<=4096) {
     ResponseJson result;
@@ -360,8 +321,7 @@ void GoToSleep(long seconds)
                 WiFi.mode(WIFI_OFF);
                 epd.Sleep();
                 esp_sleep_enable_timer_wakeup(constrain(seconds,1L,604800L) * uS_TO_S_FACTOR);
-                USE_SERIAL.println("Setup ESP32 to sleep for every " + String(seconds) +  " Seconds");
-                USE_SERIAL.println("Going to sleep now");
+                USE_SERIAL.println("Sleeping for " + String(seconds) + " s");
                 USE_SERIAL.flush(); 
                 esp_deep_sleep_start();
 
@@ -434,11 +394,11 @@ void loop() {
  
   static int loopcount=0;
   loopcount++;
-  USE_SERIAL.print("Loop = ");
-  USE_SERIAL.println(loopcount);
   if(loopcount > LOOP_TIMEOUT) {
+    USE_SERIAL.println("WiFi: no connection this wake");
     failureSleep();   // no WiFi this wake
   }
+  USE_SERIAL.printf("WiFi attempt %d of %d\n", loopcount, LOOP_TIMEOUT);
   if(WiFiMulti.run() != WL_CONNECTED) {
     delay(1000);
     delay(LOOP_DELAY);
@@ -446,7 +406,7 @@ void loop() {
   }
   wifiConnectedThisWake = true;
   wifiFailCycles = 0;
-  setClock();  
+  syncClock();   // ClockSync.h: NTP only when the clock was never set, and never fatal
   delay(200);
   pollOnce();
 }
