@@ -15,3 +15,16 @@
 #if !defined(EPD_XIAO_BREAKOUT) && !defined(EPD_XIAO_DRIVER)
 #define EPD_XIAO_DRIVER
 #endif
+
+// Fast refresh on timer wakes: only the changed pixels redraw, with no full-screen flash. Set true or false.
+// Supported panels: EPD2IN9_C; other panels ignore it. A cold boot and the setup QR still do a full
+// refresh, and so does the draw after every EPD_FULL_REFRESH_EVERY fast ones (default 60, see epd_base.h).
+#ifndef EPD_FAST_REFRESH
+#define EPD_FAST_REFRESH true
+#endif
+
+// Verbose serial log for debugging: API replies and timings, download sizes and times, refresh time, RTC state
+// at boot and time awake per wake. Set true or false. Device codes and SAS tokens are never printed.
+#ifndef EPD_VERBOSE
+#define EPD_VERBOSE true
+#endif

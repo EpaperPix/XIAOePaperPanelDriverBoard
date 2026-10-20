@@ -15,6 +15,23 @@
 #define EPD_BUSY_TIMEOUT_MS 45000UL
 #endif
 
+// Fast refresh: redraw only the pixels that change, without the full-screen black/white flash. Set
+// EPD_FAST_REFRESH true in display_config.h; the WiFi sketches then use it on timer wakes. Panels whose
+// driver is not listed in EPD_HAS_FAST_REFRESH ignore the flag.
+#ifndef EPD_FAST_REFRESH
+#define EPD_FAST_REFRESH false
+#endif
+#if defined(EPD2IN9_C)
+#define EPD_HAS_FAST_REFRESH 1
+#else
+#define EPD_HAS_FAST_REFRESH 0
+#endif
+#define EPD_USE_FAST_REFRESH (EPD_FAST_REFRESH && EPD_HAS_FAST_REFRESH)
+// Fast refreshes between two full ones. Partial refreshes leave a faint ghost that a full one clears.
+#ifndef EPD_FULL_REFRESH_EVERY
+#define EPD_FULL_REFRESH_EVERY 60
+#endif
+
 // Compile-time check every driver places next to its EPD_BLOCK_SIZE: one cloud .bin plane must be
 // exactly planeWidth x planeHeight pixels at the driver's stream bits per pixel.
 #define EPD_CHECK_PLANE(planeWidth, planeHeight, bitsPerPixel, blockSize) \
@@ -54,6 +71,7 @@ public:
     void WaitUntilIdle(void);
     void Reset(void);
     void SetLut(void);
+    void SetPartialLut(void);   // only drivers listed in EPD_HAS_FAST_REFRESH define it
      void SetLut_by_host(unsigned char *lut_vcom, unsigned char *lut_ww, unsigned char *lut_bw, unsigned char *lut_wb, unsigned char *lut_bb);
     void SendCommand(unsigned char command);
     void SetToDataMode();
@@ -84,6 +102,22 @@ public:
         }
         SendDataFast(value);
     }
+    // Draws a whole cloud frame held in memory (steps x blockSize bytes) and returns false on a BUSY timeout.
+    // fast: partial waveform, no flash; the panel RAM must hold the picture on screen. The controller swaps
+    // between two RAM banks on every refresh, so a fast-capable panel gets the frame written once more:
+    // both banks then hold this picture, which the next fast refresh compares against.
+    bool ShowFrame(const uint8_t* frame, bool fast) {
+#if EPD_HAS_FAST_REFRESH
+        if (fast) SetPartialLut(); else SetLut();
+#endif
+        WriteFrame(frame);
+        TurnOnDisplay();
+        if (busy_timed_out) return false;
+#if EPD_HAS_FAST_REFRESH
+        WriteFrame(frame);
+#endif
+        return true;
+    }
     // True once any BUSY wait has timed out since boot. Later waits return at once so the caller can
     // abandon the frame and sleep instead of hanging with the radio on.
     bool BusyTimedOut() const { return busy_timed_out; }
@@ -104,6 +138,15 @@ private:
     bool expand_1bpp_to_4bpp = false;
     unsigned long busy_timeout_ms = EPD_BUSY_TIMEOUT_MS;
     bool busy_timed_out = false;
+
+    void WriteFrame(const uint8_t* frame) {
+        for (int step = 0; step < steps; ++step) {
+            SendCommand(stepCommands[step]);
+            SetToDataMode();
+            const uint8_t* plane = frame + (unsigned long)step * blockSize;
+            for (unsigned long i = 0; i < blockSize; ++i) SendStreamByte(plane[i], step);
+        }
+    }
 
     // Bounded BUSY wait shared by every driver: waits while the BUSY pin reads busyLevel. The pin is pulled
     // toward the released level, so a missing panel or open FPC ends the wait instead of floating.

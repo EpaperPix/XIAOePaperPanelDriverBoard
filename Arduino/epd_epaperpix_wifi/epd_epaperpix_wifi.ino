@@ -25,6 +25,8 @@
 #include <WebServer.h>
 #include <EEPROM.h>
 #include "FrameTransfer.h"
+#include <memory>
+#include <new>
 #include <WiFiClientSecure.h>
 #include "TrustedRoots.h"
 void GoToSleep(long seconds);
@@ -62,9 +64,15 @@ long nextFailureSleep();
 #define DOWNLOAD_ATTEMPTS 3       /* Attempts per wake for transient download errors (the last uses the fallback host) */
 #define EEPROM_STRING_SIZE 33     /* Maximum size for EEPROM strings */
 #define EEPROM_PASS_SIZE 65       /* Maximum size for EEPROM password */
+#define DOWNLOAD_RETRY_MS 1000    /* Wait before the second download attempt; doubles for each later one */
 #ifndef EPD_CHECK_SCREEN_CODE
 #define EPD_CHECK_SCREEN_CODE 1   /* Refuse a .bin whose name says it was built for another screen code */
 #endif
+#ifndef EPD_VERBOSE
+#define EPD_VERBOSE false         /* true: also log timings, API replies and RTC state (set it in display_config.h) */
+#endif
+// Extra serial detail for debugging; compiled out when EPD_VERBOSE is false.
+#define VERBOSE(...) do { if (EPD_VERBOSE) USE_SERIAL.printf(__VA_ARGS__); } while (0)
 
 // ArduinoJson 7 sizes documents on the heap and deprecates StaticJsonDocument; 6.x needs the fixed size.
 #if ARDUINOJSON_VERSION_MAJOR >= 7
@@ -134,6 +142,10 @@ RTC_DATA_ATTR uint8_t apiFailCycles = 0;   // consecutive failed wakes: drives t
 RTC_DATA_ATTR uint8_t authFailCycles = 0;  // consecutive wakes answered HTTP 401 (unknown or revoked code)
 RTC_DATA_ATTR bool screenStale = false;    // the setup QR replaced the picture: redraw on the next good poll
 RTC_DATA_ATTR uint8_t portalReason = 0;    // why the portal reopened, shown on its page
+#if EPD_USE_FAST_REFRESH
+RTC_DATA_ATTR bool panelHoldsFrame = false; // both panel RAM banks hold the picture on screen: a fast refresh may follow
+RTC_DATA_ATTR uint8_t fastRefreshes = 0;    // fast refreshes since the last full one (EPD_FULL_REFRESH_EVERY)
+#endif
 #define PORTAL_REASON_WIFI 1
 #define PORTAL_REASON_AUTH 2
 bool wifiConnectedThisWake = false;
@@ -202,6 +214,12 @@ void setup() {
   }
 
   print_wakeup_reason();
+  VERBOSE("Reset reason: %s; free heap %u bytes\n", resetReasonText(), ESP.getFreeHeap());
+  VERBOSE("RTC: WiFi failures %d, API failures %d, 401 wakes %d, screenStale %d, portalReason %d\n",
+          wifiFailCycles, apiFailCycles, authFailCycles, screenStale, portalReason);
+#if EPD_USE_FAST_REFRESH
+  VERBOSE("RTC: panelHoldsFrame %d, fast refreshes %d of %d\n", panelHoldsFrame, fastRefreshes, EPD_FULL_REFRESH_EVERY);
+#endif
   // Stored WiFi keeps failing (router or password changed), or the server keeps rejecting the device code:
   // reopen the portal so it can be fixed without a reflash. The counters restart, so an unattended portal
   // timeout goes back to normal polling (with the back-off still in force).
@@ -235,6 +253,9 @@ void setup() {
   epd.QRset(6);    // Draw QR code; the scale is reduced to fit smaller panels
   epd.TurnOnDisplay(); // Refresh display
   screenStale = true;  // the next successful poll redraws the picture even in holding mode
+#if EPD_USE_FAST_REFRESH
+  panelHoldsFrame = false;
+#endif
   startConfigPortal();
   
   unsigned long portalWait=millis();
@@ -252,6 +273,28 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   if (event == ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED) apconnected = true;
 }
 
+
+// "HTTP 503", or what went wrong before any reply ("connection refused", "read Timeout", ...).
+String httpText(int code) {
+  return code<0 ? HTTPClient::errorToString(code) : "HTTP "+String(code);
+}
+// Blob names come with a SAS token after '?'; logs show only the name.
+String withoutQuery(const String& name) {
+  int query=name.indexOf('?');
+  return query<0 ? name : name.substring(0,query);
+}
+const char* resetReasonText() {
+  switch(esp_reset_reason()) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_EXT: return "reset pin";
+    case ESP_RST_SW: return "software restart";
+    case ESP_RST_PANIC: return "crash";
+    case ESP_RST_INT_WDT: case ESP_RST_TASK_WDT: case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
+    case ESP_RST_BROWNOUT: return "brownout (supply voltage dropped)";
+    default: return "other";
+  }
+}
 
 // Contract C6: a 503 from the device API carries {"status":"pending","secondsDelay":n} and Retry-After: n.
 // Returns n when it is 15..3600, else 0 (fall back to the back-off).
@@ -284,9 +327,11 @@ SlideShowStatus fetchSlide(bool advance) {
   else request.addHeader("Ocp-Apim-Subscription-Key",storedSubId);
   const char* responseHeaders[]={"Retry-After","Date"};
   request.collectHeaders(responseHeaders,2);
+  unsigned long started=millis();
   int code=request.POST("{}");
   setClockFromHttpDate(request.header("Date"));   // keeps the clock right without NTP
   status.httpCode=code;
+  VERBOSE("%s: %s after %lu ms\n", advance?"DeviceSlideShow":"DeviceSlideShowStart", httpText(code).c_str(), millis()-started);
   if(code==HTTP_CODE_OK && request.getSize()<=4096) {
     ResponseJson result;
     auto error=deserializeJson(result,request.getString());
@@ -301,9 +346,12 @@ SlideShowStatus fetchSlide(bool advance) {
           status.retry=false;
         }
       }
+      VERBOSE("  gotoSleep %s, secondsDelay %ld s%s%s\n", status.gotosleep?"true":"false", status.secondsdelay,
+              advance?", file ":"", advance?(status.filename.length()?withoutQuery(status.filename).c_str():"(none)"):"");
     }
   } else if(code==HTTP_CODE_SERVICE_UNAVAILABLE) {
     status.serverDelay=retryDelayFrom503(request);
+    VERBOSE("  server asks to wait %ld s\n", status.serverDelay);
   }
   request.end();
   return status;
@@ -321,6 +369,7 @@ void GoToSleep(long seconds)
                 WiFi.mode(WIFI_OFF);
                 epd.Sleep();
                 esp_sleep_enable_timer_wakeup(constrain(seconds,1L,604800L) * uS_TO_S_FACTOR);
+                VERBOSE("Awake for %lu ms this wake\n", millis());
                 USE_SERIAL.println("Sleeping for " + String(seconds) + " s");
                 USE_SERIAL.flush(); 
                 esp_deep_sleep_start();
@@ -349,10 +398,12 @@ void authFailureSleep() {
 
 // A failed API call ends the wake: 401 counts toward the portal, a 503 with a delay is obeyed, anything
 // else backs off. Returns only when the call succeeded.
+String failureText(const SlideShowStatus& status) {
+  return status.httpCode==HTTP_CODE_OK ? String("unreadable reply") : httpText(status.httpCode);
+}
 void endWakeIfFailed(const SlideShowStatus& status) {
   if(!status.retry) return;
-  USE_SERIAL.print("API call failed, HTTP ");
-  USE_SERIAL.println(status.httpCode);
+  USE_SERIAL.printf("API call failed (%s)\n", failureText(status).c_str());
   if(status.httpCode==HTTP_CODE_UNAUTHORIZED) authFailureSleep();
   if(status.serverDelay>0) GoToSleep(status.serverDelay);
   failureSleep();
@@ -406,6 +457,7 @@ void loop() {
   }
   wifiConnectedThisWake = true;
   wifiFailCycles = 0;
+  VERBOSE("WiFi connected %lu ms after boot, signal %d dBm\n", millis(), WiFi.RSSI());
   syncClock();   // ClockSync.h: NTP only when the clock was never set, and never fatal
   delay(200);
   pollOnce();
@@ -438,7 +490,7 @@ void pollOnce() {
   SlideShowStatus start = GetStart();
   for(int apiAttempt=0; worthRetrying(start) && apiAttempt<3; ++apiAttempt)
   {
-    USE_SERIAL.println("Retry...");
+    USE_SERIAL.printf("DeviceSlideShowStart failed (%s); retry %d of 3 in 0.5 s\n", failureText(start).c_str(), apiAttempt+1);
     delay(500);
     start = GetStart();
   }
@@ -449,7 +501,11 @@ void pollOnce() {
   // On a timer wake the server may say nothing changed. A cold boot, fresh device info, or a picture
   // overwritten by the setup QR always fetches and draws the current item.
   bool mustRefresh = wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED || screenStale;
-  if(start.gotosleep && !mustRefresh) GoToSleep(start.secondsdelay);
+  if(start.gotosleep && !mustRefresh) {
+    VERBOSE("Server: nothing new to show\n");
+    GoToSleep(start.secondsdelay);
+  }
+  if(start.gotosleep) VERBOSE("Redraw anyway: %s\n", screenStale ? "the setup QR is on screen" : "cold boot or new device info");
 
   SlideShowStatus slide = GetFile();   // advances the server-side cursor: called exactly once per wake
   endWakeIfFailed(slide);
@@ -462,41 +518,90 @@ void pollOnce() {
     USE_SERIAL.println(epd.screenCode);
     GoToSleep(slide.secondsdelay);
   }
+  // Transient failures retry after 1 s, then 2 s; the last attempt uses the fallback blob host.
   for(int attempt=0; attempt<DOWNLOAD_ATTEMPTS; attempt++)
   {
-    int result = DownloadAndDisplay(slide.filename, attempt);
+    String why;
+    int result = DownloadAndDisplay(slide.filename, attempt, why);
     if(result == DL_OK) { screenStale = false; GoToSleep(slide.secondsdelay); }
-    if(result == DL_PANEL) { long backoff=nextFailureSleep(); GoToSleep(max(slide.secondsdelay, backoff)); }
-    USE_SERIAL.print("DownloadAndDisplay failed, status: ");
-    USE_SERIAL.println(result);
-    if(result == DL_TERMINAL) break;
-    delay(5000);
+    if(result == DL_PANEL) {
+      USE_SERIAL.printf("Display failed (%s)\n", why.c_str());
+      long backoff=nextFailureSleep(); GoToSleep(max(slide.secondsdelay, backoff));
+    }
+    if(result == DL_TERMINAL || attempt == DOWNLOAD_ATTEMPTS-1) {
+      USE_SERIAL.printf("Download failed (%s)%s; the panel keeps its picture\n", why.c_str(),
+                        result == DL_TERMINAL ? ", retrying cannot help" : ", out of attempts");
+      break;
+    }
+    unsigned long waitMs = (unsigned long)DOWNLOAD_RETRY_MS << attempt;
+    USE_SERIAL.printf("Download attempt %d of %d failed (%s); retrying in %lu s%s\n", attempt+1, DOWNLOAD_ATTEMPTS,
+                      why.c_str(), waitMs/1000, attempt+2 == DOWNLOAD_ATTEMPTS ? " from the fallback host" : "");
+    delay(waitMs);
   }
   // A failed download ends the wake; the next wake moves on instead of advancing again now.
   GoToSleep(slide.secondsdelay);
 }
 
-int DownloadAndDisplay(const String& filename, int attempt) {
-  if(!epd.PixelFormatValid()) return DL_TERMINAL;
+// Fills `why` with a readable reason whenever it does not return DL_OK.
+int DownloadAndDisplay(const String& filename, int attempt, String& why) {
+  if(!epd.PixelFormatValid()) { why="the display driver does not declare its pixel format"; return DL_TERMINAL; }
   WiFiClientSecure secure;
   secure.setCACert(EPAPER_ROOT_CA);
   HTTPClient request;
   request.setConnectTimeout(10000); request.setTimeout(15000);
-  String url=String(attempt>=DOWNLOAD_ATTEMPTS-1?BLOB_URL_SECONDARY:BLOB_URL_PRIMARY)+filename;
-  if(!request.begin(secure,url)) return DL_TRANSIENT;
+  bool fallback=attempt>=DOWNLOAD_ATTEMPTS-1;
+  String url=String(fallback?BLOB_URL_SECONDARY:BLOB_URL_PRIMARY)+filename;
+  VERBOSE("Download %d of %d from the %s host: %s\n", attempt+1, DOWNLOAD_ATTEMPTS, fallback?"fallback":"primary", withoutQuery(filename).c_str());
+  if(!request.begin(secure,url)) { why="bad download address"; return DL_TRANSIENT; }
+  unsigned long started=millis();
   int code=request.GET();
-  if(code!=HTTP_CODE_OK) { request.end(); return (code>=400 && code<500) ? DL_TERMINAL : DL_TRANSIENT; }
+  VERBOSE("  %s, %d bytes, after %lu ms\n", httpText(code).c_str(), request.getSize(), millis()-started);
+  if(code!=HTTP_CODE_OK) { request.end(); why=httpText(code); return (code>=400 && code<500) ? DL_TERMINAL : DL_TRANSIENT; }
   long expected=(long)epd.steps*epd.blockSize;
-  if(expected<=0 || request.getSize()!=expected) { request.end(); return DL_TERMINAL; }
+  if(expected<=0 || request.getSize()!=expected) {
+    why=request.getSize()<0 ? String("no Content-Length") : "size "+String(request.getSize())+" bytes, expected "+String(expected);
+    request.end(); return DL_TERMINAL;
+  }
+  long received=0;
+#if EPD_USE_FAST_REFRESH
+  // The whole frame is read first, so a broken download never touches the panel RAM the next fast refresh needs.
+  std::unique_ptr<uint8_t[]> frame(new (std::nothrow) uint8_t[expected]);
+  if(!frame) { request.end(); why="out of memory for a "+String(expected)+" byte frame"; return DL_TRANSIENT; }
+  bool complete=readFramePlane(request,expected,[&](uint8_t* data,int count) {
+    memcpy(frame.get()+received,data,count); received+=count;
+  });
+  request.end();
+  if(!complete) { why="download stopped after "+String(received)+" of "+String(expected)+" bytes"; return DL_TRANSIENT; }
+  VERBOSE("  %ld bytes in %lu ms\n", received, millis()-started);
+  // Timer wake with a known picture on the panel: fast refresh. A cold boot, fresh device info, the setup QR
+  // and the draw after every EPD_FULL_REFRESH_EVERY fast ones do a full refresh.
+  bool fast=wakeup_reason==ESP_SLEEP_WAKEUP_TIMER && !screenStale && panelHoldsFrame && fastRefreshes<EPD_FULL_REFRESH_EVERY;
+  if(fast) USE_SERIAL.printf("Fast refresh (%d/%d)\n", fastRefreshes+1, EPD_FULL_REFRESH_EVERY);
+  else USE_SERIAL.println("Full refresh");
+  panelHoldsFrame=false;
+  unsigned long drawStarted=millis();
+  if(!epd.ShowFrame(frame.get(),fast)) { why="the panel did not finish the refresh (BUSY timeout)"; return DL_PANEL; }
+  VERBOSE("  refresh took %lu ms\n", millis()-drawStarted);
+  panelHoldsFrame=true;
+  fastRefreshes=fast ? fastRefreshes+1 : 0;
+  return DL_OK;
+#else
   for(int step=0;step<epd.steps;++step) {
     epd.SendCommand(epd.stepCommands[step]); epd.SetToDataMode();
     bool complete=readFramePlane(request,epd.blockSize,[&](uint8_t* data,int count) {
       for(int i=0;i<count;++i) epd.SendStreamByte(data[i],step);
+      received+=count;
     });
-    if(!complete) { request.end(); return DL_TRANSIENT; }
+    if(!complete) { request.end(); why="download stopped after "+String(received)+" of "+String(expected)+" bytes"; return DL_TRANSIENT; }
   }
-  request.end(); epd.TurnOnDisplay();
-  return epd.BusyTimedOut() ? DL_PANEL : DL_OK;
+  request.end();
+  VERBOSE("  %ld bytes in %lu ms\n", received, millis()-started);
+  unsigned long drawStarted=millis();
+  epd.TurnOnDisplay();
+  if(epd.BusyTimedOut()) { why="the panel did not finish the refresh (BUSY timeout)"; return DL_PANEL; }
+  VERBOSE("  refresh took %lu ms\n", millis()-drawStarted);
+  return DL_OK;
+#endif
 }
 
 
@@ -510,7 +615,9 @@ int getDeviceInfo(String deviceId) {
   if(!request.begin(secure,String(API_BASE_URL)+"/epaper3/DeviceInfo")) return 0;
   request.addHeader("Authorization",String("Bearer ")+deviceId);
   request.addHeader("Content-Type","application/json");
+  unsigned long started=millis();
   int code=request.POST("{}");
+  VERBOSE("DeviceInfo: %s after %lu ms\n", httpText(code).c_str(), millis()-started);
   bool valid=false;
   if(code==HTTP_CODE_OK && request.getSize()<=4096) {
     ResponseJson result;

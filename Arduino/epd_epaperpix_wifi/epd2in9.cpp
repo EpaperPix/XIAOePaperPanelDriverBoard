@@ -97,6 +97,14 @@ static void setMemoryPointer(int x, int y) {
     writeDataRaw(y & 0xFF);
     writeDataRaw((y >> 8) & 0xFF);
 }
+// Waveform for the next refresh: lut_full_update (every pixel driven, the screen flashes) or
+// lut_partial_update (fast refresh: only pixels that differ from the other RAM bank change).
+static void writeLut(const unsigned char* lut) {
+    writeCommandRaw(WRITE_LUT_REGISTER);
+    for (int i = 0; i < 30; i++) {
+        writeDataRaw(lut[i]);
+    }
+}
 
 Epd::~Epd() {
 };
@@ -210,10 +218,13 @@ void Epd::TurnOnDisplay(void) {
  *  @brief: set the look-up table register
  */
 void Epd::SetLut(void) {
-    SendCommand(WRITE_LUT_REGISTER);
-    for (int i = 0; i < 30; i++) {
-        SendData(lut_full_update[i]);
-    }
+    writeLut(lut_full_update);
+}
+
+// Fast refresh (EPD_FAST_REFRESH): same refresh command, partial waveform. The RAM must already hold the
+// picture on screen, which Epd::ShowFrame guarantees by writing every frame twice.
+void Epd::SetPartialLut(void) {
+    writeLut(lut_partial_update);
 }
 
 void Epd::ClearFrame() {
