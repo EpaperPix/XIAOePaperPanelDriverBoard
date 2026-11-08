@@ -149,6 +149,7 @@ RTC_DATA_ATTR uint8_t fastRefreshes = 0;    // fast refreshes since the last ful
 #define PORTAL_REASON_WIFI 1
 #define PORTAL_REASON_AUTH 2
 bool wifiConnectedThisWake = false;
+bool coldBoot = false;   // power-on or reset button, not a deep-sleep wake
 
 struct SlideShowStatus
 {
@@ -214,6 +215,7 @@ void setup() {
   }
 
   print_wakeup_reason();
+  coldBoot = esp_reset_reason() != ESP_RST_DEEPSLEEP;
   VERBOSE("Reset reason: %s; free heap %u bytes\n", resetReasonText(), ESP.getFreeHeap());
   VERBOSE("RTC: WiFi failures %d, API failures %d, 401 wakes %d, screenStale %d, portalReason %d\n",
           wifiFailCycles, apiFailCycles, authFailCycles, screenStale, portalReason);
@@ -447,6 +449,13 @@ void loop() {
   loopcount++;
   if(loopcount > LOOP_TIMEOUT) {
     USE_SERIAL.println("WiFi: no connection this wake");
+    if(coldBoot) {
+      // Powered up somewhere the stored network is missing (device moved): show the setup QR now instead of
+      // waiting for WIFI_FAIL_CYCLES_FOR_PORTAL failed wakes. The 1 s wake takes the reopen path in setup().
+      USE_SERIAL.println("WiFi failed after a cold start; opening the config portal");
+      wifiFailCycles = WIFI_FAIL_CYCLES_FOR_PORTAL;
+      GoToSleep(1);
+    }
     failureSleep();   // no WiFi this wake
   }
   USE_SERIAL.printf("WiFi attempt %d of %d\n", loopcount, LOOP_TIMEOUT);

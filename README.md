@@ -93,7 +93,7 @@ In `display_config.h`, set the default panel define (for example `#define EPD2IN
 4. Enter your WiFi credentials and epaperpix.app device code
 5. Device will automatically fetch and display content
 
-The portal reopens by itself after three wakes without WiFi or three wakes where the server rejects the device code. Blank fields keep the saved values; the saved device code is never shown (only its last four characters). Reset (tick the box, then press Reset) erases the WiFi settings and the device code.
+The portal reopens by itself after three wakes without WiFi or three wakes where the server rejects the device code. After switching the device on (or pressing reset) somewhere its saved WiFi cannot be reached, it shows the setup QR straight away. Blank fields keep the saved values; the saved device code is never shown (only its last four characters). Reset (tick the box, then press Reset) erases the WiFi settings and the device code.
 
 ### Serial Mode (epd_serial)
 
